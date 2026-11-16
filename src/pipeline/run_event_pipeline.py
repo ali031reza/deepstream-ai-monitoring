@@ -185,7 +185,7 @@ class EventPipelineApplication:
 
     settings: AppSettings
 
-        def run(self, argv=None):
+    def run(self, argv=None):
         parser = argparse.ArgumentParser(add_help=False)
         parser.add_argument("--event-root", default=str(self.settings.events.root))
         parser.add_argument("--event-min-confidence", type=float, default=self.settings.events.minimum_confidence)

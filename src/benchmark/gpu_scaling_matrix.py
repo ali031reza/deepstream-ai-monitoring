@@ -45,7 +45,7 @@ def main():
         before = set(output_dir.glob("end_to_end_*.json"))
         cmd = [
             sys.executable, "-m", "src.pipeline.run_end_to_end",
-            "--source", args.source, "--source-id", args.source_id,
+            "--source", str(settings.paths.resolve(args.source)), "--source-id", args.source_id,
             "--gpu-id", str(args.gpu_id),
             "--model-a-workers", str(model_a_workers),
             "--model-b-workers", str(model_b_workers),
@@ -54,7 +54,7 @@ def main():
             "--db-timeout", str(args.db_timeout),
             "--metrics-dir", str(output_dir),
         ]
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, cwd=settings.paths.root)
         new_reports = set(output_dir.glob("end_to_end_*.json")) - before
         if len(new_reports) != 1:
             raise RuntimeError("Expected exactly one end-to-end metrics report")

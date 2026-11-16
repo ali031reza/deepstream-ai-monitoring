@@ -37,7 +37,7 @@ def main():
             "--report-dir", str(directory), "--await-database",
             "--db-timeout", str(args.db_timeout),
         ]
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, cwd=settings.paths.root)
         written = set(glob.glob(str(directory / "load_*.json"))) - before
         if len(written) != 1:
             raise RuntimeError("Could not identify this profile's unique result")

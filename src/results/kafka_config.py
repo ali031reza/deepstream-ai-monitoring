@@ -6,6 +6,7 @@ JSON files are accepted as an import format, but no JSON copy is required.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ def load_kafka_config(config_path: str | Path | None = None) -> dict[str, Any]:
     paths = ProjectPaths.from_environment()
     load_dotenv(paths.env_file, override=False)
     path = paths.resolve(config_path) if config_path else paths.resolve(
-        __import__("os").environ.get("APP_CONFIG_PATH") or paths.config_file
+        os.environ.get("APP_CONFIG_PATH") or paths.config_file
     )
     if path.suffix.lower() == ".json":
         if not path.is_file():
