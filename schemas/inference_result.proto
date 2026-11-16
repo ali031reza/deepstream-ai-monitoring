@@ -1,0 +1,59 @@
+
+syntax = "proto3";
+
+package ai_monitoring;
+
+// One detection produced by an AI model.
+message Detection {
+    int32 class_id = 1;
+    string class_name = 2;
+    float confidence = 3;
+
+    // Normalized coordinates: x1, y1, x2, y2.
+    repeated float bbox_normalized = 4;
+
+    bool synthetic = 5;
+}
+
+// Individual inference stage timing.
+message StageTiming {
+    string stage = 1;
+    double duration_ms = 2;
+}
+
+message InferenceResult {
+
+    // Existing backend fields: preserve their numbers.
+    string camera_id = 1;
+    string frame_id = 2;
+    string model_id = 3;
+    int64 processed_at_ms = 4;
+    string status = 5;
+
+    bool is_event = 6;
+    string event_type = 7;
+
+    string storage_key = 8;
+    string image_format = 9;
+    int64 image_size_bytes = 10;
+    string image_sha256 = 11;
+
+    int64 captured_at_ms = 12;
+
+    // New DeepStream integration fields.
+    string source_session_id = 13;
+    string result_id = 14;
+    string worker_id = 15;
+
+    uint64 frame_sequence = 16;
+
+    uint32 gpu_id = 17;
+    uint32 frame_width = 18;
+    uint32 frame_height = 19;
+    uint32 model_input_size = 20;
+
+    repeated Detection detections = 21;
+    repeated StageTiming timings = 22;
+
+    string schema_version = 23;
+}
