@@ -72,8 +72,8 @@ class QueueSettings:
 
     def __post_init__(self) -> None:
         _positive(self.model_input_capacity, "queues.model_input_capacity")
-        if self.overflow_policy not in {"drop_oldest", "drop_newest", "block"}:
-            raise ValueError("queues.overflow_policy must be drop_oldest, drop_newest or block")
+        if self.overflow_policy != "block":
+            raise ValueError("Only queues.overflow_policy=block is implemented by the current GPU dispatcher")
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +213,8 @@ class ConfigurationLoader:
         if set(models_data) != {"model_a", "model_b"}:
             raise ValueError("models must define model_a and model_b")
         models = {name: ModelSettings(**_section(models_data, name)) for name in models_data}
+        if not all(model.enabled for model in models.values()):
+            raise ValueError("The current two-model GPU pipeline requires both models enabled")
         queue = QueueSettings(**_section(raw, "queues"))
         event_data = _section(raw, "event_frames")
         events = EventSettings(

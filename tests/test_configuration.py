@@ -77,3 +77,12 @@ def test_duplicate_kafka_topics_are_rejected(tmp_path, monkeypatch):
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="topics must be unique"):
         ConfigurationLoader().load(path)
+
+
+def test_only_supported_queue_policy_is_accepted(tmp_path):
+    raw = yaml.safe_load(ProjectPaths.from_environment().config_file.read_text(encoding="utf-8"))
+    raw["queues"]["overflow_policy"] = "drop_newest"
+    path = tmp_path / "unsupported.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="Only queues.overflow_policy=block"):
+        ConfigurationLoader().load(path)

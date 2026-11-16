@@ -38,7 +38,7 @@ def _base_option(args: list[str], flag: str, default: str):
 
 
 def make_event_model(original_type, *, model_key, camera_id, session_id,
-                     store, policy, metrics):
+                     store, policy, metrics, enabled=True):
     """Model wrapper guarantees image exists before Kafka sees event metadata."""
     class EventModel:
         def __init__(self, *args, **kwargs):
@@ -50,7 +50,7 @@ def make_event_model(original_type, *, model_key, camera_id, session_id,
             metrics.add(f"{model_key}.infer", duration_ms=(time.perf_counter()-started)*1000)
             output = dict(output)
             # The mock models do NOT perform real-world event recognition.
-            qualifies = policy.matches(output, frame_id)
+            qualifies = enabled and policy.matches(output, frame_id)
             output["is_event"] = qualifies
             if qualifies:
                 started = time.perf_counter()
@@ -221,7 +221,8 @@ class EventPipelineApplication:
             pipeline.MODEL_CLASSES = {
                 key: make_event_model(cls, model_key=key, camera_id=camera_id,
                                       session_id=session, store=store,
-                                      policy=policy, metrics=metrics)
+                                      policy=policy, metrics=metrics,
+                                      enabled=self.settings.events.enabled)
                 for key, cls in original_models.items()
             }
             pipeline.AsyncProtobufKafkaPublisher = make_publisher_proxy(

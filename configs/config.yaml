@@ -12,7 +12,7 @@ pipeline:
     mode: file                  # file | rtsp
     camera_id: camera_0
     uri: videos/sample.mp4
-    realtime: true
+    realtime: true              # reserved; MP4 playback pacing is pipeline-controlled
   gpu_id: 0
   decode_once: true
   sample_limit: 5
@@ -26,7 +26,7 @@ models:
     hidden_units: 128
     top_k: 5
     seed: 42
-    mock_delay_ms: 30
+    mock_delay_ms: 30            # reserved for future deterministic mock models
   model_b:
     enabled: true
     model_id: mock_model_b
@@ -35,11 +35,11 @@ models:
     hidden_units: 512
     top_k: 5
     seed: 84
-    mock_delay_ms: 50
+    mock_delay_ms: 50            # reserved for future deterministic mock models
 
 queues:
   model_input_capacity: 4
-  overflow_policy: drop_newest   # documented initial choice; verify under load
+  overflow_policy: block   # existing GPU fan-out uses blocking queue.put; may backpressure decode
 
 event_frames:
   enabled: true

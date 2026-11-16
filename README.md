@@ -256,3 +256,17 @@ python -m src.pipeline.run_end_to_end --source /workspace/videos/your-video.mp4
 DeepStream/GPU commands require the NVIDIA DeepStream environment; the config
 unit tests do not. Generated events, reports and JSONL result sinks belong under
 `artifacts/` and are ignored by Git.
+
+### Current feature boundaries
+
+The current GPU frame dispatcher uses **blocking bounded queues**. The YAML
+accepts only `queues.overflow_policy: block` until safe nonblocking frame ownership
+and overflow handling are implemented and tested. With this policy, overload in
+one model can backpressure shared decoding. The `realtime` and `mock_delay_ms`
+settings are reserved for future implementation; they are not active controls
+in the present GPU runner. Both mock model paths must remain enabled.
+
+The orchestration entry points and settings are dataclass-driven. Some legacy
+smoke-test/benchmark helpers and the low-level DeepStream frame callbacks
+remain procedural; convert those incrementally with GPU regression tests
+rather than replacing buffer-lifetime code without runtime validation.
