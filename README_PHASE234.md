@@ -45,12 +45,12 @@ cd /mnt/d/projects/deepstream-ai-monitoring
 unzip -o /path/to/deepstream_phase234_patch.zip
 ```
 
-This patch adds new files; no existing file is intentionally overwritten. Your local Phase 1 v2 package must remain installed. Generated event JPEGs and reports will live under `artifacts/` on your bind-mounted host checkout.
+This historical phase document describes the original incremental implementation. Your local Phase 1 v2 package must remain installed. Generated event JPEGs and reports will live under `artifacts/` on your bind-mounted host checkout.
 
 Install required libraries inside the running `dev` container:
 
 ```bash
-docker compose exec -T dev python3 -m pip install -r requirements-phase234.txt
+docker compose exec -T dev python3 -m pip install -r requirements.txt
 ```
 
 The package deliberately does **not** change `requirements.txt` or `docker/Dockerfile`: reproducible rebuilds/Compose secret configuration are part of your postponed Phase 5. A container rebuild can remove manually installed libraries.
@@ -162,7 +162,7 @@ Running more GPU workers means more CUDA streams and model weights in GPU memory
 5. **No real model events:** Confidence/event logic currently operates on **synthetic mock detections**. Adapt policy when real models arrive.
 6. **No production HA claim:** Live outage/rebalance/extended-load recovery tests from Phase 1 are still deferred, and this Phase 2–4 integration has not been tested against your GPU machine here.
 7. **Phase 5 is not included:** Container dependency persistence, startup orchestration, `.env`/secret injection, final health checks and production packaging remain for the later phase.
-8. **Generated files:** Consider excluding `artifacts/event_frames/` and `artifacts/benchmarks/` in `.gitignore` before any `git add .`; do not commit images or large benchmark reports unintentionally.
+8. **Generated files:** All of `artifacts/` is excluded by `.gitignore`.
 9. **No GitHub changes were made.** You decide when to commit/push your locally tested code.
 
 ## File inventory
@@ -172,4 +172,4 @@ Running more GPU workers means more CUDA streams and model weights in GPU memory
 - `src/pipeline/{run_event_pipeline,run_end_to_end}.py` + tests
 - `src/benchmark/{kafka_load,consumer_lag,run_matrix,gpu_scaling_matrix}.py` + tests
 - `configs/config.yaml`
-- `requirements-phase234.txt`
+- `requirements.txt`

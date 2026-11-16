@@ -18,5 +18,12 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Compile Python sources
         run: python -m compileall -q configs src
-      - name: Run CPU-only configuration tests
-        run: python -m pytest -q tests/test_configuration.py
+      - name: Run CPU-only unit tests
+        run: |
+          python -m pytest -q \
+            tests/test_configuration.py \
+            src/storage/event_frame_store_test.py \
+            src/storage/verify_event_images_test.py \
+            src/monitoring/metrics_test.py \
+            src/pipeline/run_event_pipeline_test.py \
+            src/results/protobuf_result_adapter_test.py
