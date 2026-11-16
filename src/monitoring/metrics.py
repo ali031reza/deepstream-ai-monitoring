@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
+from configs.paths import ProjectPaths
 import threading
 import time
 
@@ -59,7 +60,7 @@ class RunMetrics:
 
 
 def save_json(path: str | Path, document: dict):
-    target = Path(path)
+    target = ProjectPaths.from_environment().resolve(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")

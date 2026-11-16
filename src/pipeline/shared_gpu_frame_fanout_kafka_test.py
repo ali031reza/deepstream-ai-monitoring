@@ -31,6 +31,7 @@ from google.protobuf.json_format import MessageToDict
 
 from pyservicemaker import BufferRetriever, Flow, Pipeline
 
+from configs.settings import load_settings
 from src.models.mock_gpu_model_a import MockGPUModelA
 from src.models.mock_gpu_model_b import MockGPUModelB
 
@@ -1320,6 +1321,7 @@ def verify_protobuf_kafka_results(
 # ============================================================
 
 def build_parser():
+    settings = load_settings()
 
     parser = argparse.ArgumentParser(
         description=(
@@ -1330,39 +1332,39 @@ def build_parser():
 
     parser.add_argument(
         "--source",
-        required=True,
+        default=settings.source.resolved_uri(settings.paths),
     )
 
     parser.add_argument(
         "--source-id",
-        default="camera_0",
+        default=settings.source.camera_id,
     )
 
     parser.add_argument(
         "--gpu-id",
         type=nonnegative_int,
-        default=0,
+        default=settings.gpu_id,
     )
 
     parser.add_argument(
         "--queue-size",
         type=positive_int,
-        default=4,
+        default=settings.queues.model_input_capacity,
     )
 
     parser.add_argument(
         "--sample-limit",
         type=nonnegative_int,
-        default=5,
+        default=settings.sample_limit,
     )
 
     parser.add_argument(
         "--kafka-config",
-        default=None,
-        help="Path to config/kafka.json.",
+        default=str(settings.paths.config_file),
+        help="Path to configs/config.yaml (legacy JSON is also accepted).",
     )
 
-    # Optional overrides. If omitted, config/kafka.json is used.
+    # Optional command-line overrides of configs/config.yaml.
 
     parser.add_argument(
         "--result-queue-size",
@@ -1385,49 +1387,49 @@ def build_parser():
     parser.add_argument(
         "--model-a-input-size",
         type=positive_int,
-        default=320,
+        default=settings.models["model_a"].input_size,
     )
 
     parser.add_argument(
         "--model-a-hidden-units",
         type=positive_int,
-        default=128,
+        default=settings.models["model_a"].hidden_units,
     )
 
     parser.add_argument(
         "--model-a-top-k",
         type=positive_int,
-        default=5,
+        default=settings.models["model_a"].top_k,
     )
 
     parser.add_argument(
         "--model-a-seed",
         type=int,
-        default=42,
+        default=settings.models["model_a"].seed,
     )
 
     parser.add_argument(
         "--model-b-input-size",
         type=positive_int,
-        default=320,
+        default=settings.models["model_b"].input_size,
     )
 
     parser.add_argument(
         "--model-b-hidden-units",
         type=positive_int,
-        default=512,
+        default=settings.models["model_b"].hidden_units,
     )
 
     parser.add_argument(
         "--model-b-top-k",
         type=positive_int,
-        default=5,
+        default=settings.models["model_b"].top_k,
     )
 
     parser.add_argument(
         "--model-b-seed",
         type=int,
-        default=84,
+        default=settings.models["model_b"].seed,
     )
 
     return parser
@@ -1441,7 +1443,7 @@ def main():
 
     args = build_parser().parse_args()
 
-    video_path = Path(args.source)
+    video_path = load_settings().paths.resolve(args.source)
 
     if not video_path.is_file():
 

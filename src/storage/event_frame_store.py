@@ -11,6 +11,7 @@ import hashlib
 from io import BytesIO
 import os
 from pathlib import Path, PurePosixPath
+from configs.paths import ProjectPaths
 import re
 import threading
 import uuid
@@ -35,7 +36,7 @@ class EventFrameStore:
     """
 
     def __init__(self, root: str | Path, *, quality: int = 88):
-        self.root = Path(root).expanduser().resolve()
+        self.root = ProjectPaths.from_environment().resolve(root)
         if not 1 <= quality <= 95:
             raise ValueError("JPEG quality must be in [1, 95]")
         self.quality = quality

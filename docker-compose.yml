@@ -13,13 +13,6 @@ services:
     environment:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
 
-      # Kafka connection from inside Docker network
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-
-      # Independent model result topics
-      MODEL_A_RESULT_TOPIC: model-a-results
-      MODEL_B_RESULT_TOPIC: model-b-results
-
     working_dir: /workspace
 
     volumes:

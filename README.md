@@ -39,9 +39,8 @@ Important properties:
 - The pipeline test consumes the results after producer flush and verifies
   the actual binary Protobuf messages from that run.
 
-The current test has one GPU worker per model. Configurable multi-worker
-pools are a later step; this test first verifies the single-worker
-end-to-end path.
+The event-pipeline runner supports independent configurable worker pools for
+both mock models. Configure the defaults in configs/config.yaml or override via CLI.
 
 ## Protobuf result contract
 
@@ -61,8 +60,8 @@ The adapter maps:
 - GPU and pipeline stage timings
 - event-image metadata when an image has actually been stored
 
-The current mock models do not emit events. Event metadata therefore
-remains false/empty until the event-frame storage stage is implemented.
+Mock outputs are synthetic; the event pipeline can select and persist qualifying
+frames, but the mock models do not establish real-world detection quality.
 The pipeline must not publish a successful event reference before its
 image has been stored.
 
@@ -73,7 +72,7 @@ handling must be finalized when the source moves to RTSP.
 
 ## Kafka configuration
 
-`config/kafka.json` defines the broker, model-specific topics, bounded
+`configs/config.yaml` defines the broker, model-specific topics, bounded
 publisher queues, batching, and producer settings.
 
 Inside the Docker Compose network, the bootstrap address is:
@@ -111,7 +110,7 @@ docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
 
 ## Files
 
-- `config/kafka.json`: broker, topic, queue, batching, and producer
+- `configs/config.yaml`: broker, topic, queue, batching, and producer
   settings.
 - `schemas/inference_result.proto`: backend Protobuf contract.
 - `src/proto/inference_result_pb2.py`: generated Python Protobuf module.
@@ -222,3 +221,52 @@ DEEPSTREAM + TWO GPU MODELS + INDEPENDENT BINARY PROTOBUF KAFKA TEST PASSED
   this standalone DeepStream pipeline.
 - Configurable worker pools, RTSP ingestion, and real AI models remain
   later milestones.
+
+## Central configuration and environment
+
+All non-secret defaults live in **`configs/config.yaml`**. Typed dataclasses
+and validation live in `configs/settings.py`; `configs/paths.py` resolves
+relative paths from the repository root rather than the current directory.
+Kafka publishing, result consumption, PostgreSQL connection settings, source,
+mock models, queues, event-frame storage and benchmark defaults are configured
+there. Explicit legacy JSON configuration files are still accepted by the
+Kafka adapters, but no JSON copy is shipped.
+
+Create a local environment file before running services:
+
+```bash
+cp .env.example .env
+# Edit DATABASE_PASSWORD (and any overrides) locally.
+```
+
+`.env` is excluded from Git and Docker build context. **Never commit
+credentials.** Environment variables supplied by the shell or Docker override
+values in `.env` and the YAML Kafka/database defaults. Use
+`APP_CONFIG_PATH` or `PROJECT_ROOT` for nonstandard deployments.
+
+From the repository root:
+
+```bash
+python -m pip install -r requirements.txt
+python -m pytest tests/test_configuration.py
+python -m src.results.run_results_processor --config configs/config.yaml
+python -m src.pipeline.run_end_to_end --source /workspace/videos/your-video.mp4
+```
+
+DeepStream/GPU commands require the NVIDIA DeepStream environment; the config
+unit tests do not. Generated events, reports and JSONL result sinks belong under
+`artifacts/` and are ignored by Git.
+
+### Current feature boundaries
+
+The current GPU frame dispatcher uses **blocking bounded queues**. The YAML
+accepts only `queues.overflow_policy: block` until safe nonblocking frame ownership
+and overflow handling are implemented and tested. With this policy, overload in
+one model can backpressure shared decoding. The `realtime` and `mock_delay_ms`
+settings are reserved for future implementation; they are not active controls
+in the present GPU runner. Both mock model paths must remain enabled.
+
+The orchestration entry points and settings are dataclass-driven. Some legacy
+smoke-test/benchmark helpers and the low-level DeepStream frame callbacks
+remain procedural; convert those incrementally with GPU regression tests
+rather than replacing buffer-lifetime code without runtime validation.

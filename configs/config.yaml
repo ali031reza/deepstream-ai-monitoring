@@ -1,0 +1,114 @@
+# Single source of truth for the DeepStream proof of concept.
+# Relative paths are resolved against PROJECT_ROOT (the repository root by default).
+# Secrets and machine-specific overrides belong in .env, not here.
+paths:
+  source: videos/sample.mp4
+  event_frames: artifacts/event_frames
+  benchmarks: artifacts/benchmarks
+  result_sink: artifacts/results
+
+pipeline:
+  source:
+    mode: file                  # file | rtsp
+    camera_id: camera_0
+    uri: videos/sample.mp4
+    realtime: true              # reserved; MP4 playback pacing is pipeline-controlled
+  gpu_id: 0
+  decode_once: true
+  sample_limit: 5
+
+models:
+  model_a:
+    enabled: true
+    model_id: mock_model_a
+    workers: 1
+    input_size: 320
+    hidden_units: 128
+    top_k: 5
+    seed: 42
+    mock_delay_ms: 30            # reserved for future deterministic mock models
+  model_b:
+    enabled: true
+    model_id: mock_model_b
+    workers: 1
+    input_size: 320
+    hidden_units: 512
+    top_k: 5
+    seed: 84
+    mock_delay_ms: 50            # reserved for future deterministic mock models
+
+queues:
+  model_input_capacity: 4
+  overflow_policy: block   # existing GPU fan-out uses blocking queue.put; may backpressure decode
+
+event_frames:
+  enabled: true
+  root: artifacts/event_frames
+  jpeg_quality: 88
+  minimum_confidence: 0.65
+  every_nth_frame: 30
+  class_name: null
+  trigger_policy: any_model_event
+  deduplicate_by: [camera_id, source_session_id, frame_id]
+
+monitoring:
+  resource_interval_seconds: 2.0
+  metrics_directory: artifacts/benchmarks
+
+benchmark:
+  load_frames: 500
+  target_fps: [25, 100, 250]
+  worker_profiles: ["1x1", "2x1", "1x2", "2x2"]
+  report_directory: artifacts/benchmarks
+  database_timeout_seconds: 180
+
+kafka:
+  bootstrap_servers: kafka:9092
+  topics:
+    mock_model_a: model-a-results
+    mock_model_b: model-b-results
+  publisher:
+    queue_maxsize: 128
+    max_batch_messages: 32
+    batch_flush_interval_ms: 100
+    enqueue_timeout_seconds: 5.0
+    produce_retry_seconds: 120.0
+    shutdown_timeout_seconds: 30.0
+    producer:
+      acks: all
+      enable.idempotence: true
+      compression.type: lz4
+      linger.ms: 10
+      batch.size: 65536
+      message.timeout.ms: 120000
+      request.timeout.ms: 30000
+      socket.keepalive.enable: true
+  results_consumer:
+    group_id: deepstream-results-processor
+    auto_offset_reset: earliest
+    poll_timeout_seconds: 0.5
+    session_timeout_ms: 45000
+    max_poll_interval_ms: 900000
+  batch_processing:
+    batch_size: 100
+    flush_interval_ms: 50
+    queue_capacity: 300
+    retry_attempts: 3
+    retry_backoff_ms: 250
+    shutdown_timeout_seconds: 180
+  dead_letter:
+    topic: inference-dead-letter
+    flush_timeout_seconds: 15
+  kafka_admin:
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 604800000
+    request_timeout_seconds: 30
+
+database:
+  host: host.docker.internal
+  port: 5432
+  dbname: ai_monitoring
+  user: ai_app
+  password_env: DATABASE_PASSWORD
+  connect_timeout: 5

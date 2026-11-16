@@ -11,6 +11,7 @@ import queue
 import threading
 import time
 from pathlib import Path
+from configs.paths import ProjectPaths
 from typing import Any, Mapping
 
 from src.results.model_result_message import serialize_result_message
@@ -45,7 +46,7 @@ class AsyncJSONLResultSink:
             raise ValueError("flush_interval_ms must be greater than zero.")
 
         self.model_id = model_id
-        self.output_path = Path(output_path)
+        self.output_path = ProjectPaths.from_environment().resolve(output_path)
         self.batch_size = int(batch_size)
         self.flush_interval_seconds = flush_interval_ms / 1000.0
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=int(queue_size))

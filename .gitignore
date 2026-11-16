@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -37,3 +37,13 @@ Thumbs.db
 # Generated runtime data
 artifacts/event_frames/
 artifacts/benchmarks/
+
+# Never version generated run data, images, benchmark reports or JSONL sinks
+/artifacts/
+
+# Tooling
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
