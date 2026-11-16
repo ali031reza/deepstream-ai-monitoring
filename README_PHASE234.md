@@ -1,3 +1,5 @@
+> Historical phase guide. For current configuration and setup, see README.md and configs/config.yaml.
+
 # DeepStream AI Monitoring — Phases 2, 3 and 4
 
 **Target:** `ali031reza/deepstream-ai-monitoring`, branch `DeepStream_Pipeline`, with the **Phase 1 v2 Kafka consumer files already installed locally**.
@@ -112,7 +114,7 @@ First, start the Phase 1 results processor in **Terminal A**:
 
 ```bash
 docker compose exec -e DATABASE_PASSWORD="$DATABASE_PASSWORD" -T dev \
-  python3 -m src.results.run_results_processor --config config/kafka.json
+  python3 -m src.results.run_results_processor --config configs/config.yaml
 ```
 
 Then, in **Terminal B** (same project directory):
@@ -169,5 +171,5 @@ Running more GPU workers means more CUDA streams and model weights in GPU memory
 - `src/monitoring/{metrics,resource_sampler}.py` + tests
 - `src/pipeline/{run_event_pipeline,run_end_to_end}.py` + tests
 - `src/benchmark/{kafka_load,consumer_lag,run_matrix,gpu_scaling_matrix}.py` + tests
-- `config/phase234.example.json`
+- `configs/config.yaml`
 - `requirements-phase234.txt`

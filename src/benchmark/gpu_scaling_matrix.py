@@ -5,6 +5,7 @@ import csv
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from configs.settings import load_settings
 import subprocess
 import sys
 
@@ -22,21 +23,22 @@ def parse_profiles(value: str):
 
 
 def main():
+    settings = load_settings()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", required=True)
-    parser.add_argument("--source-id", default="camera_0")
-    parser.add_argument("--profiles", default="1x1,2x1,1x2,2x2")
-    parser.add_argument("--gpu-id", type=int, default=0)
-    parser.add_argument("--kafka-config", default="config/kafka.json")
-    parser.add_argument("--event-root", default="artifacts/event_frames")
-    parser.add_argument("--report-dir", default="artifacts/benchmarks")
-    parser.add_argument("--db-timeout", type=float, default=180)
+    parser.add_argument("--source", default=settings.source.resolved_uri(settings.paths))
+    parser.add_argument("--source-id", default=settings.source.camera_id)
+    parser.add_argument("--profiles", default=','.join(settings.benchmark.worker_profiles))
+    parser.add_argument("--gpu-id", type=int, default=settings.gpu_id)
+    parser.add_argument("--kafka-config", default=str(settings.paths.config_file))
+    parser.add_argument("--event-root", default=str(settings.events.root))
+    parser.add_argument("--report-dir", default=str(settings.benchmark.report_directory))
+    parser.add_argument("--db-timeout", type=float, default=settings.benchmark.database_timeout_seconds)
     args = parser.parse_args()
     try:
         profiles = parse_profiles(args.profiles)
     except ValueError as exc:
         parser.error(str(exc))
-    output_dir = Path(args.report_dir)
+    output_dir = settings.paths.resolve(args.report_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for model_a_workers, model_b_workers in profiles:

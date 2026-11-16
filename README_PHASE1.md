@@ -1,10 +1,12 @@
+> Historical phase guide. For current configuration and setup, see README.md and configs/config.yaml.
+
 # Phase 1 — Kafka Reliability Patch
 
 This is an **overlay patch** for the existing `deepstream-ai-monitoring`
 repository on your `DeepStream_Pipeline` branch, building on the previously
 installed Kafka asynchronous batch module. It is **not** a standalone repo and
 does **not** replace your DeepStream producer, Protobuf-generated module,
-PostgreSQL migration, or `config/kafka.json`.
+PostgreSQL migration, or `configs/config.yaml`.
 
 No GitHub changes were made. No passwords are included.
 
@@ -63,7 +65,7 @@ With other publishers stopped and Kafka healthy, run from your repository root:
 ```bash
 docker compose exec -e DATABASE_PASSWORD="$DATABASE_PASSWORD" -T dev \
   python3 -m src.results.phase1_dead_letter_smoke \
-  --config config/kafka.json
+  --config configs/config.yaml
 ```
 
 The test:

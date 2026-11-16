@@ -1,5 +1,0 @@
-# Install in the DeepStream dev container (not a replacement for requirements.txt).
-Pillow>=11.0,<13
-psutil>=6.0,<9
-# psycopg is needed for the already-installed Phase-1 results processor.
-psycopg[binary]>=3.2,<4

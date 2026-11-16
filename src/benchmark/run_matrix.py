@@ -6,24 +6,26 @@ from datetime import datetime, timezone
 import glob
 import json
 from pathlib import Path
+from configs.settings import load_settings
 import subprocess
 import sys
 
 
 def main():
+    settings = load_settings()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rates", default="25,100,250")
-    parser.add_argument("--frames", type=int, default=500)
-    parser.add_argument("--kafka-config", default="config/kafka.json")
-    parser.add_argument("--report-dir", default="artifacts/benchmarks")
-    parser.add_argument("--db-timeout", type=float, default=180.)
+    parser.add_argument("--rates", default=",".join(str(n) for n in settings.benchmark.target_fps))
+    parser.add_argument("--frames", type=int, default=settings.benchmark.load_frames)
+    parser.add_argument("--kafka-config", default=str(settings.paths.config_file))
+    parser.add_argument("--report-dir", default=str(settings.benchmark.report_directory))
+    parser.add_argument("--db-timeout", type=float, default=settings.benchmark.database_timeout_seconds)
     args = parser.parse_args()
     if args.frames < 1:
         parser.error("--frames must be >= 1")
     rates = [float(x) for x in args.rates.split(",")]
     if not rates or any(x < 0 for x in rates):
         parser.error("--rates must contain nonnegative numbers")
-    directory = Path(args.report_dir)
+    directory = settings.paths.resolve(args.report_dir)
     directory.mkdir(parents=True, exist_ok=True)
     rows = []
     for rate in rates:

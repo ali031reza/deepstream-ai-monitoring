@@ -242,7 +242,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Test independent asynchronous Kafka result publishers"
     )
-    parser.add_argument("--config", default=None, help="Path to config/kafka.json")
+    parser.add_argument("--config", default=None, help="Path to configs/config.yaml")
     parser.add_argument("--messages-per-model", type=int, default=100)
     parser.add_argument("--consume-timeout", type=float, default=60.0)
     parser.add_argument("--keep-test-topics", action="store_true")

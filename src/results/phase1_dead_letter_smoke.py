@@ -6,7 +6,7 @@ configured. Does NOT insert any database records. Produces exactly one invalid
 message to the model-A result topic and confirms its DLT envelope and the
 source group's committed offset. Run with other result publishers stopped.
 
-    python3 -m src.results.phase1_dead_letter_smoke --config config/kafka.json
+    python3 -m src.results.phase1_dead_letter_smoke --config configs/config.yaml
 """
 from __future__ import annotations
 

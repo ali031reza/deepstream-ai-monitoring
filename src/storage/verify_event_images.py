@@ -1,5 +1,6 @@
 """Read-only PostgreSQL metadata ↔ persistent JPEG integrity verification."""
 from __future__ import annotations
+from configs.settings import load_settings
 import argparse
 import json
 
@@ -44,10 +45,11 @@ def verify_session(database, store: EventFrameStore, session_id: str):
 
 
 def main():
+    settings = load_settings()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-id", required=True)
-    parser.add_argument("--event-root", default="artifacts/event_frames")
-    parser.add_argument("--kafka-config", default="config/kafka.json")
+    parser.add_argument("--event-root", default=str(settings.events.root))
+    parser.add_argument("--kafka-config", default=str(settings.paths.config_file))
     args = parser.parse_args()
     from src.kafka.runtime_config import load_runtime_config
     from src.database.client import DatabaseClient

@@ -11,6 +11,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import queue as std_queue
@@ -20,6 +21,7 @@ import time
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+from configs.settings import AppSettings, load_settings
 from src.monitoring.metrics import RunMetrics, save_json
 from src.monitoring.resource_sampler import ResourceSampler
 from src.storage.event_frame_store import EventFrameStore
@@ -177,90 +179,101 @@ def make_safe_verifier_assignment(original_wait, partition_type):
     return safe_wait
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--event-root", default="artifacts/event_frames")
-    parser.add_argument("--event-min-confidence", type=float, default=0.65)
-    parser.add_argument("--event-every-n", type=int, default=30)
-    parser.add_argument("--event-class", default=None)
-    parser.add_argument("--jpeg-quality", type=int, default=88)
-    parser.add_argument("--model-a-workers", type=int, default=1)
-    parser.add_argument("--model-b-workers", type=int, default=1)
-    parser.add_argument("--session-id", default=None)
-    parser.add_argument("--metrics-json", default=None)
-    parser.add_argument("--resource-interval", type=float, default=2.0)
-    opts, original_args = parser.parse_known_args(argv)
-    if opts.model_a_workers < 1 or opts.model_b_workers < 1:
-        parser.error("Worker counts must be >= 1")
-    if opts.resource_interval <= 0:
-        parser.error("--resource-interval must be > 0")
-    session = UUID(opts.session_id).hex if opts.session_id else uuid4().hex
-    camera_id = _base_option(original_args, "--source-id", "camera_0")
-    store = EventFrameStore(opts.event_root, quality=opts.jpeg_quality)
-    policy = EventPolicy(opts.event_min_confidence, opts.event_every_n, opts.event_class)
-    metrics = RunMetrics()
-    sampler = ResourceSampler(interval_seconds=opts.resource_interval).start()
-    metrics_target = opts.metrics_json or f"artifacts/benchmarks/phase234_{session}.json"
-    failure = None
-    print(f"PHASE234 source_session_id={session}", flush=True)
-    print(f"PHASE234 event_root={store.root} model_a_workers={opts.model_a_workers} "
-          f"model_b_workers={opts.model_b_workers}", flush=True)
-    try:
-        # Heavy CuPy/pyservicemaker imports happen only inside the DeepStream container.
-        from src.pipeline import shared_gpu_frame_fanout_kafka_test as pipeline
+@dataclass(slots=True)
+class EventPipelineApplication:
+    """Configure the event-pipeline runner and own its full run lifecycle."""
 
-        original_models = dict(pipeline.MODEL_CLASSES)
-        pipeline.MODEL_CLASSES = {
-            key: make_event_model(cls, model_key=key, camera_id=camera_id,
-                                  session_id=session, store=store,
-                                  policy=policy, metrics=metrics)
-            for key, cls in original_models.items()
-        }
-        pipeline.AsyncProtobufKafkaPublisher = make_publisher_proxy(
-            pipeline.AsyncProtobufKafkaPublisher, metrics,
-        )
-        original_adapter = pipeline.build_inference_result
-        def with_worker_identity(*args, **kwargs):
-            kwargs["worker_id"] = threading.current_thread().name.replace("_", "-")
-            return original_adapter(*args, **kwargs)
-        pipeline.build_inference_result = with_worker_identity
-        original_worker = pipeline.gpu_worker
-        pipeline.gpu_worker = make_worker_supervisor(
-            original_worker, opts.model_a_workers, opts.model_b_workers,
-        )
-        pipeline.queue = make_queue_factory(opts.model_a_workers, opts.model_b_workers)
-        pipeline.uuid4 = lambda: UUID(hex=session)
-        # The original Kafka verifier subscribes using `latest`. A single
-        # poll after assignment is insufficient to guarantee resolved start
-        # offsets; explicitly pin its start to the pre-publish high-watermarks.
-        from confluent_kafka import TopicPartition
-        pipeline.wait_for_consumer_assignment = make_safe_verifier_assignment(
-            pipeline.wait_for_consumer_assignment, TopicPartition,
-        )
-        old_argv = sys.argv
+    settings: AppSettings
+
+        def run(self, argv=None):
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--event-root", default=str(self.settings.events.root))
+        parser.add_argument("--event-min-confidence", type=float, default=self.settings.events.minimum_confidence)
+        parser.add_argument("--event-every-n", type=int, default=self.settings.events.every_nth_frame)
+        parser.add_argument("--event-class", default=self.settings.events.class_name)
+        parser.add_argument("--jpeg-quality", type=int, default=self.settings.events.jpeg_quality)
+        parser.add_argument("--model-a-workers", type=int, default=self.settings.models["model_a"].workers)
+        parser.add_argument("--model-b-workers", type=int, default=self.settings.models["model_b"].workers)
+        parser.add_argument("--session-id", default=None)
+        parser.add_argument("--metrics-json", default=None)
+        parser.add_argument("--resource-interval", type=float, default=self.settings.resource_interval_seconds)
+        opts, original_args = parser.parse_known_args(argv)
+        if opts.model_a_workers < 1 or opts.model_b_workers < 1:
+            parser.error("Worker counts must be >= 1")
+        if opts.resource_interval <= 0:
+            parser.error("--resource-interval must be > 0")
+        session = UUID(opts.session_id).hex if opts.session_id else uuid4().hex
+        camera_id = _base_option(original_args, "--source-id", self.settings.source.camera_id)
+        store = EventFrameStore(self.settings.paths.resolve(opts.event_root), quality=opts.jpeg_quality)
+        policy = EventPolicy(opts.event_min_confidence, opts.event_every_n, opts.event_class)
+        metrics = RunMetrics()
+        sampler = ResourceSampler(interval_seconds=opts.resource_interval).start()
+        metrics_target = opts.metrics_json or self.settings.metrics_directory / f"phase234_{session}.json"
+        failure = None
+        print(f"PHASE234 source_session_id={session}", flush=True)
+        print(f"PHASE234 event_root={store.root} model_a_workers={opts.model_a_workers} "
+              f"model_b_workers={opts.model_b_workers}", flush=True)
         try:
-            sys.argv = [old_argv[0], *original_args]
-            pipeline.main()
+            # Heavy CuPy/pyservicemaker imports happen only inside the DeepStream container.
+            from src.pipeline import shared_gpu_frame_fanout_kafka_test as pipeline
+
+            original_models = dict(pipeline.MODEL_CLASSES)
+            pipeline.MODEL_CLASSES = {
+                key: make_event_model(cls, model_key=key, camera_id=camera_id,
+                                      session_id=session, store=store,
+                                      policy=policy, metrics=metrics)
+                for key, cls in original_models.items()
+            }
+            pipeline.AsyncProtobufKafkaPublisher = make_publisher_proxy(
+                pipeline.AsyncProtobufKafkaPublisher, metrics,
+            )
+            original_adapter = pipeline.build_inference_result
+            def with_worker_identity(*args, **kwargs):
+                kwargs["worker_id"] = threading.current_thread().name.replace("_", "-")
+                return original_adapter(*args, **kwargs)
+            pipeline.build_inference_result = with_worker_identity
+            original_worker = pipeline.gpu_worker
+            pipeline.gpu_worker = make_worker_supervisor(
+                original_worker, opts.model_a_workers, opts.model_b_workers,
+            )
+            pipeline.queue = make_queue_factory(opts.model_a_workers, opts.model_b_workers)
+            pipeline.uuid4 = lambda: UUID(hex=session)
+            # The original Kafka verifier subscribes using `latest`. A single
+            # poll after assignment is insufficient to guarantee resolved start
+            # offsets; explicitly pin its start to the pre-publish high-watermarks.
+            from confluent_kafka import TopicPartition
+            pipeline.wait_for_consumer_assignment = make_safe_verifier_assignment(
+                pipeline.wait_for_consumer_assignment, TopicPartition,
+            )
+            old_argv = sys.argv
+            try:
+                sys.argv = [old_argv[0], *original_args]
+                pipeline.main()
+            finally:
+                sys.argv = old_argv
+        except BaseException as exc:
+            failure = f"{type(exc).__name__}: {exc}"
+            metrics.error(failure)
+            raise
         finally:
-            sys.argv = old_argv
-    except BaseException as exc:
-        failure = f"{type(exc).__name__}: {exc}"
-        metrics.error(failure)
-        raise
-    finally:
-        samples = sampler.stop()
-        report = {
-            "schema": "phase234-run-v1", "source_session_id": session,
-            "camera_id": camera_id,
-            "event_store": str(store.root), "event_store_stats": store.stats(),
-            "event_policy": vars(opts).copy(),
-            "worker_counts": {"model_a": opts.model_a_workers, "model_b": opts.model_b_workers},
-            "metrics": metrics.snapshot(), "resources": samples,
-            "failed": failure,
-        }
-        save_json(metrics_target, report)
-        print(f"PHASE234 metrics_json={Path(metrics_target).resolve()}", flush=True)
-        print(f"PHASE234 event_store_stats={json.dumps(store.stats())}", flush=True)
+            samples = sampler.stop()
+            report = {
+                "schema": "phase234-run-v1", "source_session_id": session,
+                "camera_id": camera_id,
+                "event_store": str(store.root), "event_store_stats": store.stats(),
+                "event_policy": vars(opts).copy(),
+                "worker_counts": {"model_a": opts.model_a_workers, "model_b": opts.model_b_workers},
+                "metrics": metrics.snapshot(), "resources": samples,
+                "failed": failure,
+            }
+            save_json(self.settings.paths.resolve(metrics_target), report)
+            print(f"PHASE234 metrics_json={self.settings.paths.resolve(metrics_target)}", flush=True)
+            print(f"PHASE234 event_store_stats={json.dumps(store.stats())}", flush=True)
+
+
+
+def main(argv=None):
+    EventPipelineApplication(load_settings()).run(argv)
 
 
 if __name__ == "__main__":

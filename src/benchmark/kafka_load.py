@@ -7,6 +7,8 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from configs.settings import load_settings
+from configs.paths import ProjectPaths
 import time
 from uuid import uuid4, uuid5, NAMESPACE_URL
 
@@ -142,7 +144,7 @@ def run(args):
     finally:
         resources_snapshot = resources.stop()
         # On failure persist what was observed as well.
-        output = Path(args.report_dir) / f"load_{session_id}.json"
+        output = ProjectPaths.from_environment().resolve(args.report_dir) / f"load_{session_id}.json"
         if "report" not in locals():
             report = {
                 "session_id": session_id, "frames": args.frames,
@@ -155,16 +157,17 @@ def run(args):
 
 
 def main():
+    settings = load_settings()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--frames", type=int, default=500)
+    parser.add_argument("--frames", type=int, default=settings.benchmark.load_frames)
     parser.add_argument("--rate", type=float, default=100.,
                         help="Target source frames/sec; two Kafka messages per frame. 0 = unthrottled")
-    parser.add_argument("--camera-id", default="phase4-load-camera")
-    parser.add_argument("--kafka-config", default="config/kafka.json")
+    parser.add_argument("--camera-id", default=settings.source.camera_id)
+    parser.add_argument("--kafka-config", default=str(settings.paths.config_file))
     parser.add_argument("--await-database", action="store_true")
-    parser.add_argument("--db-timeout", type=float, default=180)
+    parser.add_argument("--db-timeout", type=float, default=settings.benchmark.database_timeout_seconds)
     parser.add_argument("--kafka-timeout", type=float, default=90)
-    parser.add_argument("--report-dir", default="artifacts/benchmarks")
+    parser.add_argument("--report-dir", default=str(settings.benchmark.report_directory))
     args = parser.parse_args()
     if args.frames <= 0 or args.rate < 0 or args.db_timeout <= 0 or args.kafka_timeout <= 0:
         parser.error("frames must be positive, rate nonnegative, timeouts positive")
