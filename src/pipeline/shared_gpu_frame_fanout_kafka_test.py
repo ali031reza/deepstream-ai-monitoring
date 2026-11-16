@@ -1,6 +1,7 @@
 
 
 
+
 """
 DeepStream shared GPU frame fan-out with independent binary Protobuf publishers.
 
@@ -1543,6 +1544,10 @@ def main():
         "bootstrap.servers": kafka_config["bootstrap_servers"],
         "group.id": f"deepstream-protobuf-verify-{source_session_id}",
         "auto.offset.reset": "latest",
+        # The verifier intentionally pauses polling while DeepStream runs.
+        # Keep the assignment alive for long MP4 files; the initial poll
+        # resolves the latest offsets before either publisher starts.
+        "max.poll.interval.ms": 86_400_000,
         "enable.auto.commit": False,
     })
 
