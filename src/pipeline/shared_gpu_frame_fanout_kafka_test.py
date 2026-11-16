@@ -1,13 +1,13 @@
 
 """
-DeepStream shared GPU frame fan-out with independent Kafka publishers.
+DeepStream shared GPU frame fan-out with independent binary Protobuf publishers.
 
 Architecture:
     DeepStream -> one shared GPU frame -> Model A / Model B
-    Model A -> independent AsyncKafkaPublisher -> model-a-results
-    Model B -> independent AsyncKafkaPublisher -> model-b-results
+    Model A -> Protobuf adapter -> AsyncProtobufKafkaPublisher
+    Model B -> Protobuf adapter -> AsyncProtobufKafkaPublisher
 
-No CPU frame copy and no aggregation between model results.
+Each model publishes its own InferenceResult message. No model aggregation.
 """
 
 from __future__ import annotations
@@ -20,22 +20,26 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from uuid import uuid4
 
 import cupy as cp
+from confluent_kafka import Consumer, KafkaError, KafkaException
+from google.protobuf.json_format import MessageToDict
 
 from pyservicemaker import BufferRetriever, Flow, Pipeline
 
 from src.models.mock_gpu_model_a import MockGPUModelA
 from src.models.mock_gpu_model_b import MockGPUModelB
 
-from src.results.async_kafka_publisher import AsyncKafkaPublisher
+from src.proto.inference_result_pb2 import InferenceResult
+from src.results.async_protobuf_kafka_publisher import AsyncProtobufKafkaPublisher
 from src.results.kafka_config import (
     load_kafka_config,
     producer_config_for_model,
     publisher_options,
     topic_for_model,
 )
-from src.results.model_result_message import ModelResultMessage
+from src.results.protobuf_result_adapter import build_inference_result
 
 
 CUDA_DLPACK_DEVICE_TYPE = 2
@@ -147,12 +151,14 @@ class SharedGPUFrame:
     def __init__(
         self,
         frame_id,
+        captured_at_ms,
         deepstream_tensor,
         gpu_array,
         on_release,
     ):
 
         self.frame_id = frame_id
+        self.captured_at_ms = int(captured_at_ms)
 
         self._deepstream_tensor = deepstream_tensor
 
@@ -304,6 +310,11 @@ class FanoutRetriever(BufferRetriever):
 
             self.frames_seen += 1
 
+        # MP4 has no trustworthy wall-clock capture timestamp.
+        # For this POC, record when DeepStream hands the frame to
+        # the retriever; both model results reuse this same value.
+        captured_at_ms = time.time_ns() // 1_000_000
+
         raw_tensor = None
 
         owned_tensor = None
@@ -386,6 +397,7 @@ class FanoutRetriever(BufferRetriever):
 
             packet = SharedGPUFrame(
                 frame_id=frame_id,
+                captured_at_ms=captured_at_ms,
                 deepstream_tensor=owned_tensor,
                 gpu_array=gpu_array,
                 on_release=self._on_frame_released,
@@ -584,6 +596,7 @@ def gpu_worker(
     gpu_id,
     model_config,
     source_id,
+    source_session_id,
     kafka_publisher,
     results,
     results_lock,
@@ -597,8 +610,8 @@ def gpu_worker(
     """
     Own one GPU model and one CUDA stream.
 
-    Each worker publishes only its own model results to its
-    own AsyncKafkaPublisher instance.
+    Each worker adapts its own output to InferenceResult and
+    publishes only to its model-specific Protobuf publisher.
     """
 
     stream = None
@@ -742,7 +755,7 @@ def gpu_worker(
                             "match input packet."
                         )
 
-                    # Add pipeline-level timings to the model timings.
+                    # Add pipeline-level timings to the model output.
 
                     result_for_message = dict(
                         inference_result
@@ -762,14 +775,17 @@ def gpu_worker(
 
                     result_for_message["timings_ms"] = timings
 
-                    # Build one independent versioned result message.
+                    # Adapt directly to the backend InferenceResult contract.
+                    # Event metadata remains false/empty until an event image
+                    # has actually been stored by the event-frame stage.
 
-                    result_message = (
-                        ModelResultMessage.from_inference_result(
-                            result_for_message,
-                            source_id=source_id,
-                            model_id=expected_result_id,
-                        )
+                    result_message = build_inference_result(
+                        result_for_message,
+                        camera_id=source_id,
+                        source_session_id=source_session_id,
+                        frame_sequence=packet.frame_id,
+                        captured_at_ms=packet.captured_at_ms,
+                        worker_id=f"{model_id}-worker-01",
                     )
 
                     # Asynchronous enqueue to this model's publisher.
@@ -790,6 +806,10 @@ def gpu_worker(
 
                     record = {
                         "frame_id": packet.frame_id,
+                        "protobuf_frame_id": result_message.frame_id,
+                        "result_id": result_message.result_id,
+                        "captured_at_ms": result_message.captured_at_ms,
+                        "processed_at_ms": result_message.processed_at_ms,
                         "model_id": model_id,
                         "gpu_id": gpu_id,
                         "gpu_pointer": frame_pointer,
@@ -799,9 +819,7 @@ def gpu_worker(
                         "timings_ms": dict(
                             inference_result.get("timings_ms", {})
                         ),
-                        "detection_count": len(
-                            inference_result.get("detections", [])
-                        ),
+                        "detection_count": len(result_message.detections),
                     }
 
                     with results_lock:
@@ -813,8 +831,15 @@ def gpu_worker(
                         is None
                     ):
 
+                        sample_message = MessageToDict(
+                            result_message,
+                            preserving_proto_field_name=True,
+                        )
+                        sample_message["detection_count"] = len(
+                            result_message.detections
+                        )
                         worker_info[model_id]["sample_message"] = (
-                            result_message.to_dict()
+                            sample_message
                         )
 
                 except Exception as exc:
@@ -1078,6 +1103,206 @@ def print_publisher_statistics(
     print("================================")
 
 
+def wait_for_consumer_assignment(
+    consumer,
+    timeout_seconds=30.0,
+):
+    """Wait until the verification consumer owns its result-topic partitions."""
+
+    deadline = time.monotonic() + timeout_seconds
+
+    while time.monotonic() < deadline:
+
+        assignment = consumer.assignment()
+
+        if assignment:
+            return assignment
+
+        message = consumer.poll(0.1)
+
+        if message is not None and message.error():
+
+            if message.error().code() != KafkaError._PARTITION_EOF:
+                raise KafkaException(message.error())
+
+    raise TimeoutError(
+        "Kafka verification consumer did not receive a partition assignment."
+    )
+
+
+def verify_protobuf_kafka_results(
+    consumer,
+    *,
+    topic_to_model,
+    camera_id,
+    source_session_id,
+    expected_frames,
+    timeout_seconds=60.0,
+):
+    """
+    Consume and validate the actual binary Protobuf messages emitted by
+    this DeepStream run. Messages from other source sessions are ignored.
+    """
+
+    received = {
+        model_id: {}
+        for model_id in CONSUMERS
+    }
+
+    expected_total = expected_frames * len(CONSUMERS)
+    deadline = time.monotonic() + timeout_seconds
+
+    while sum(len(items) for items in received.values()) < expected_total:
+
+        remaining = deadline - time.monotonic()
+
+        if remaining <= 0:
+            break
+
+        kafka_message = consumer.poll(min(1.0, remaining))
+
+        if kafka_message is None:
+            continue
+
+        if kafka_message.error():
+
+            if kafka_message.error().code() == KafkaError._PARTITION_EOF:
+                continue
+
+            raise KafkaException(kafka_message.error())
+
+        model_key = topic_to_model.get(kafka_message.topic())
+
+        if model_key is None:
+            continue
+
+        payload = kafka_message.value()
+
+        if not payload:
+            continue
+
+        decoded = InferenceResult()
+        decoded.ParseFromString(payload)
+
+        # Production topics may contain messages from other cameras/runs.
+        if decoded.source_session_id != source_session_id:
+            continue
+
+        expected_model_id = EXPECTED_RESULT_MODEL_IDS[model_key]
+
+        if decoded.model_id != expected_model_id:
+            raise AssertionError(
+                f"{model_key}: Protobuf model_id mismatch: "
+                f"{decoded.model_id!r}"
+            )
+
+        if decoded.camera_id != camera_id:
+            raise AssertionError(
+                f"{model_key}: camera_id mismatch"
+            )
+
+        if decoded.schema_version != "1.0":
+            raise AssertionError(
+                f"{model_key}: schema version mismatch"
+            )
+
+        if decoded.status != "processed":
+            raise AssertionError(
+                f"{model_key}: unexpected result status {decoded.status!r}"
+            )
+
+        sequence = int(decoded.frame_sequence)
+
+        if not 0 <= sequence < expected_frames:
+            raise AssertionError(
+                f"{model_key}: frame sequence out of range: {sequence}"
+            )
+
+        expected_frame_id = f"{source_session_id}:{sequence:012d}"
+
+        if decoded.frame_id != expected_frame_id:
+            raise AssertionError(
+                f"{model_key}: frame_id does not match source session/sequence"
+            )
+
+        if not decoded.result_id:
+            raise AssertionError(
+                f"{model_key}: missing deterministic result_id"
+            )
+
+        if decoded.captured_at_ms <= 0 or decoded.processed_at_ms <= 0:
+            raise AssertionError(
+                f"{model_key}: missing capture/processing timestamp"
+            )
+
+        if not decoded.detections:
+            raise AssertionError(
+                f"{model_key}: no detections were serialized"
+            )
+
+        timing_names = {
+            timing.stage
+            for timing in decoded.timings
+        }
+
+        if not {"queue_wait_ms", "worker_processing_ms"}.issubset(
+            timing_names
+        ):
+            raise AssertionError(
+                f"{model_key}: pipeline timing metadata is missing"
+            )
+
+        if sequence in received[model_key]:
+            raise AssertionError(
+                f"{model_key}: duplicate Protobuf result for frame {sequence}"
+            )
+
+        received[model_key][sequence] = decoded
+
+    expected_sequences = set(range(expected_frames))
+
+    for model_key in CONSUMERS:
+
+        actual_sequences = set(received[model_key])
+
+        if actual_sequences != expected_sequences:
+            missing = sorted(expected_sequences - actual_sequences)
+            raise AssertionError(
+                f"{model_key}: received {len(actual_sequences)}/"
+                f"{expected_frames} Protobuf results; missing={missing[:10]}"
+            )
+
+    # Both models must refer to the same source frame and capture timestamp.
+    for sequence in range(expected_frames):
+
+        result_a = received["model_a"][sequence]
+        result_b = received["model_b"][sequence]
+
+        if result_a.frame_id != result_b.frame_id:
+            raise AssertionError(
+                f"Frame {sequence}: model frame identities differ"
+            )
+
+        if result_a.captured_at_ms != result_b.captured_at_ms:
+            raise AssertionError(
+                f"Frame {sequence}: capture timestamps differ"
+            )
+
+        if result_a.result_id == result_b.result_id:
+            raise AssertionError(
+                f"Frame {sequence}: model result IDs are not independent"
+            )
+
+    return {
+        "passed": True,
+        "messages_received": expected_total,
+        "per_model": {
+            model_key: len(received[model_key])
+            for model_key in CONSUMERS
+        },
+    }
+
+
 # ============================================================
 # ARGUMENT PARSER
 # ============================================================
@@ -1218,6 +1443,10 @@ def main():
             "--source-id must not be empty."
         )
 
+    # Every application run gets a distinct identity, even if the
+    # source frame counter restarts at zero.
+    source_session_id = uuid4().hex
+
     # --------------------------------------------------------
     # GPU INITIALIZATION
     # --------------------------------------------------------
@@ -1286,7 +1515,7 @@ def main():
 
     publishers = {
 
-        model_id: AsyncKafkaPublisher(
+        model_id: AsyncProtobufKafkaPublisher(
             model_id=EXPECTED_RESULT_MODEL_IDS[model_id],
             topic=topics[model_id],
             producer_config=producer_config_for_model(
@@ -1298,6 +1527,13 @@ def main():
 
         for model_id in CONSUMERS
     }
+
+    consumer = Consumer({
+        "bootstrap.servers": kafka_config["bootstrap_servers"],
+        "group.id": f"deepstream-protobuf-verify-{source_session_id}",
+        "auto.offset.reset": "latest",
+        "enable.auto.commit": False,
+    })
 
     # --------------------------------------------------------
     # MODEL CONFIGURATION
@@ -1324,14 +1560,21 @@ def main():
 
     print(
         "DEEPSTREAM + SHARED GPU FRAME FAN-OUT "
-        "+ TWO INDEPENDENT KAFKA PUBLISHERS"
+        "+ TWO INDEPENDENT BINARY PROTOBUF PUBLISHERS"
     )
 
     print("=" * 72)
 
     print(f"Video: {video_path}")
 
-    print(f"Source ID: {args.source_id}")
+    print(f"Camera ID: {args.source_id}")
+
+    print(f"Source session ID: {source_session_id}")
+
+    print(
+        "Capture timestamp mode: DeepStream receiver wall-clock "
+        "(MP4 proof-of-concept)"
+    )
 
     print(f"GPU: {gpu_name}")
 
@@ -1420,6 +1663,7 @@ def main():
                 args.gpu_id,
                 model_configs[model_id],
                 args.source_id,
+                source_session_id,
                 publishers[model_id],
                 results,
                 results_lock,
@@ -1464,7 +1708,24 @@ def main():
     try:
 
         print(
-            "\nStarting independent Kafka publishers...",
+            "\nStarting Kafka Protobuf verification consumer...",
+            flush=True,
+        )
+
+        consumer.subscribe(list(topics.values()))
+
+        assignment = wait_for_consumer_assignment(
+            consumer,
+            timeout_seconds=30.0,
+        )
+
+        print(
+            f"Kafka verifier assigned {len(assignment)} partition(s).",
+            flush=True,
+        )
+
+        print(
+            "\nStarting independent Protobuf Kafka publishers...",
             flush=True,
         )
 
@@ -1649,10 +1910,51 @@ def main():
 
     summary = retriever.get_summary()
 
+    kafka_verification = {
+        "passed": False,
+        "messages_received": 0,
+        "per_model": {},
+        "error": None,
+    }
+
+    try:
+
+        if pipeline_error is None and summary["frames_submitted"] > 0:
+
+            kafka_verification = verify_protobuf_kafka_results(
+                consumer,
+                topic_to_model={
+                    topics[model_id]: model_id
+                    for model_id in CONSUMERS
+                },
+                camera_id=args.source_id,
+                source_session_id=source_session_id,
+                expected_frames=summary["frames_submitted"],
+                timeout_seconds=60.0,
+            )
+
+        else:
+
+            kafka_verification["error"] = (
+                "Pipeline did not complete a non-empty frame run."
+            )
+
+    except Exception as exc:
+
+        kafka_verification["error"] = (
+            f"{type(exc).__name__}: {exc}"
+        )
+
+        traceback.print_exc()
+
+    finally:
+
+        consumer.close()
+
     print("\n" + "=" * 72)
 
     print(
-        "DEEPSTREAM + GPU INFERENCE + KAFKA RESULTS"
+        "DEEPSTREAM + GPU INFERENCE + BINARY PROTOBUF KAFKA RESULTS"
     )
 
     print("=" * 72)
@@ -1909,6 +2211,22 @@ def main():
     )
 
     print(
+        "Binary Protobuf consumer verification: "
+        f"{kafka_verification['passed']}"
+    )
+
+    print(
+        f"Verified Protobuf messages: "
+        f"{kafka_verification['messages_received']}"
+    )
+
+    if kafka_verification.get("error"):
+        print(
+            f"Protobuf verification error: "
+            f"{kafka_verification['error']}"
+        )
+
+    print(
         f"Worker errors: {len(worker_errors)}"
     )
 
@@ -1977,6 +2295,8 @@ def main():
 
         model_b_kafka_valid,
 
+        kafka_verification["passed"],
+
         len(worker_errors) == 0,
 
         len(startup_errors) == 0,
@@ -1989,14 +2309,14 @@ def main():
 
         print(
             "DEEPSTREAM + TWO GPU MODELS + "
-            "INDEPENDENT KAFKA PUBLISHERS TEST PASSED"
+            "INDEPENDENT BINARY PROTOBUF KAFKA TEST PASSED"
         )
 
     else:
 
         print(
             "DEEPSTREAM + TWO GPU MODELS + "
-            "INDEPENDENT KAFKA PUBLISHERS TEST FAILED"
+            "INDEPENDENT BINARY PROTOBUF KAFKA TEST FAILED"
         )
 
         for error in worker_errors:
@@ -2016,8 +2336,8 @@ def main():
     if not successful:
 
         raise RuntimeError(
-            "DeepStream GPU inference and Kafka "
-            "publishing validation failed."
+            "DeepStream GPU inference and binary Protobuf Kafka "
+            "validation failed."
         )
 
 
