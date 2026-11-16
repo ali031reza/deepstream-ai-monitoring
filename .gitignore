@@ -1,0 +1,35 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Logs
+*.log
+
+# Generated media
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+
+# Generated files
+.DS_Store
+Thumbs.db

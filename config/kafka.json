@@ -1,0 +1,29 @@
+{
+  "bootstrap_servers": "kafka:9092",
+  "topics": {
+    "mock_model_a": "model-a-results",
+    "mock_model_b": "model-b-results"
+  },
+  "publisher": {
+    "queue_maxsize": 128,
+    "max_batch_messages": 32,
+    "batch_flush_interval_ms": 100,
+    "enqueue_timeout_seconds": 5.0,
+    "produce_retry_seconds": 120.0,
+    "shutdown_timeout_seconds": 30.0,
+    "producer": {
+      "acks": "all",
+      "enable.idempotence": true,
+      "compression.type": "lz4",
+      "linger.ms": 10,
+      "batch.size": 65536,
+      "message.timeout.ms": 120000,
+      "request.timeout.ms": 30000,
+      "socket.keepalive.enable": true
+    }
+  },
+  "consumer_test": {
+    "poll_timeout_seconds": 1.0,
+    "consume_timeout_seconds": 60.0
+  }
+}

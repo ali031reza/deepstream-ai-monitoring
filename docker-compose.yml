@@ -1,0 +1,96 @@
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+
+    image: deepstream-ai-monitoring:dev
+    container_name: deepstream-ai-monitoring-dev
+
+    gpus: all
+
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+
+      # Kafka connection from inside Docker network
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+      # Independent model result topics
+      MODEL_A_RESULT_TOPIC: model-a-results
+      MODEL_B_RESULT_TOPIC: model-b-results
+
+    working_dir: /workspace
+
+    volumes:
+      - .:/workspace
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+    stdin_open: true
+    tty: true
+
+    command: ["bash"]
+
+  kafka:
+    image: apache/kafka:4.4.0
+    container_name: deepstream-ai-monitoring-kafka
+    hostname: kafka
+
+    restart: unless-stopped
+
+    ports:
+      # Host access for Kafka inspection tools
+      - "127.0.0.1:29092:29092"
+
+    environment:
+      # KRaft node configuration
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      # Network listeners
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      # KRaft controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      # Stable cluster ID
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+
+      # Single-broker development configuration
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # Topic configuration
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      # Persistent storage location
+      KAFKA_LOG_DIRS: /tmp/kafka-data
+
+
+    volumes:
+      - kafka_data:/tmp/kraft-combined-logs
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  kafka_data:
