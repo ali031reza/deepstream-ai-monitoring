@@ -1,99 +1,224 @@
-# Standalone Kafka result publishing layer
+# DeepStream AI Monitoring — single-camera, two-model POC
 
-This package adds a new Kafka publishing layer to `deepstream-ai-monitoring`.
-It does not import code from the separate `KAFKA_AI_Monitoring` repository.
+This repository contains the standalone DeepStream proof of concept for
+Kafka AI Monitoring. It does not import code from the separate
+`KAFKA_AI_Monitoring` repository.
 
-## Architecture
+## Active DeepStream architecture
 
-- One `AsyncKafkaPublisher` instance for `mock_model_a`.
-- One `AsyncKafkaPublisher` instance for `mock_model_b`.
-- Each publisher owns its own bounded Python queue and Kafka producer.
-- Each model writes to its own Kafka topic.
-- Messages use a versioned JSON envelope.
-- `confluent-kafka` performs asynchronous delivery and native producer batching.
-- The publisher worker drains up to `max_batch_messages` per application batch.
-- `linger.ms` and `batch.size` control librdkafka's native batching.
+The current end-to-end path is:
 
-The publishers never combine Model A and Model B results.
-
-## Files
-
-- `config/kafka.json`: broker, topic, queue and producer settings.
-- `schemas/model_result.schema.json`: documented JSON message contract.
-- `src/results/model_result_message.py`: validated result envelope.
-- `src/results/kafka_config.py`: configuration loading and environment overrides.
-- `src/results/async_kafka_publisher.py`: independent asynchronous publisher.
-- `src/results/kafka_publisher_test.py`: real Kafka publish/consume integration test.
-- `requirements.txt`: preserves PyYAML and adds confluent-kafka.
-
-## Install
-
-Copy the files into the matching paths in the project, replacing
-`requirements.txt` with the supplied complete file.
-
-Rebuild the development image:
-
-```bash
-docker compose build dev
+```text
+One MP4 source
+    |
+DeepStream decode
+    |
+One shared GPU frame allocation
+    |
+    +--------------------------+
+    |                          |
+Model A GPU worker        Model B GPU worker
+    |                          |
+InferenceResult adapter   InferenceResult adapter
+    |                          |
+Async Protobuf publisher  Async Protobuf publisher
+    |                          |
+model-a-results           model-b-results
 ```
 
-The existing Dockerfile already installs `requirements.txt`; no Dockerfile
-change is required.
+Important properties:
 
-## Broker connectivity
+- The source is decoded once.
+- Both models receive the same shared GPU frame allocation.
+- Each model has its own bounded input queue, worker, publisher queue,
+  Kafka producer, and result topic.
+- Each model publishes independently; neither waits for the other.
+- Kafka carries binary Protobuf inference results, not raw video frames.
+- A unique `source_session_id` is generated for each application run.
+- The result ID is deterministic for a camera/session/frame/model pair.
+- The pipeline test consumes the results after producer flush and verifies
+  the actual binary Protobuf messages from that run.
 
-Inside the Docker Compose network, the default bootstrap address is:
+The current test has one GPU worker per model. Configurable multi-worker
+pools are a later step; this test first verifies the single-worker
+end-to-end path.
+
+## Protobuf result contract
+
+The active DeepStream path uses the backend `InferenceResult` Protobuf
+message defined in `schemas/inference_result.proto`.
+
+The adapter maps:
+
+- `camera_id`
+- `source_session_id`
+- `frame_id` and `frame_sequence`
+- `model_id` and `worker_id`
+- `result_id`
+- `captured_at_ms` and `processed_at_ms`
+- detections, normalized bounding boxes, confidence values, and synthetic
+  flags
+- GPU and pipeline stage timings
+- event-image metadata when an image has actually been stored
+
+The current mock models do not emit events. Event metadata therefore
+remains false/empty until the event-frame storage stage is implemented.
+The pipeline must not publish a successful event reference before its
+image has been stored.
+
+For the MP4 proof of concept, `captured_at_ms` records the wall-clock time
+when DeepStream hands the frame to the retriever. This is an arrival-time
+fallback, not the original recording time. Source PTS/NTP timestamp
+handling must be finalized when the source moves to RTSP.
+
+## Kafka configuration
+
+`config/kafka.json` defines the broker, model-specific topics, bounded
+publisher queues, batching, and producer settings.
+
+Inside the Docker Compose network, the bootstrap address is:
 
 ```text
 kafka:9092
 ```
 
-The Windows host address is not used by the `dev` container.
+The `dev` container uses this internal address. The Windows host address
+is not used from inside the container.
 
-## Run the integration test
-
-Make sure the Kafka service is healthy, then run:
-
-```bash
-docker compose run --rm dev   python3 -m src.results.kafka_publisher_test   --messages-per-model 100   --consume-timeout 60
-```
-
-The test creates unique temporary topics, publishes 100 messages per model,
-consumes them, validates model identity, frame IDs, message IDs and payload
-contents, then deletes the temporary topics.
-
-To retain the temporary topics for inspection, add:
-
-```text
---keep-test-topics
-```
-
-## Production topics
-
-The configured production topics are:
+Configured production topics:
 
 - `model-a-results`
 - `model-b-results`
 
-Create them after the broker is healthy:
+The development broker disables automatic topic creation. Create the
+topics after Kafka is healthy:
 
 ```bash
-docker compose exec kafka   /opt/kafka/bin/kafka-topics.sh   --bootstrap-server localhost:9092   --create --if-not-exists   --topic model-a-results   --partitions 3   --replication-factor 1
+docker compose up -d kafka
 
-docker compose exec kafka   /opt/kafka/bin/kafka-topics.sh   --bootstrap-server localhost:9092   --create --if-not-exists   --topic model-b-results   --partitions 3   --replication-factor 1
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create --if-not-exists \
+  --topic model-a-results \
+  --partitions 3 --replication-factor 1
+
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create --if-not-exists \
+  --topic model-b-results \
+  --partitions 3 --replication-factor 1
 ```
 
-## Important delivery semantics
+## Files
 
-`enable.idempotence=true` and `acks=all` improve producer-side delivery
-reliability. They do not make the whole inference-to-Kafka pipeline exactly
-once. If the application retries an inference result after an uncertain
-shutdown, downstream consumers should use `message_id` for deduplication.
+- `config/kafka.json`: broker, topic, queue, batching, and producer
+  settings.
+- `schemas/inference_result.proto`: backend Protobuf contract.
+- `src/proto/inference_result_pb2.py`: generated Python Protobuf module.
+- `src/results/protobuf_result_adapter.py`: converts model output to
+  `InferenceResult`.
+- `src/results/async_protobuf_kafka_publisher.py`: active binary
+  Protobuf publisher, one instance per model.
+- `src/results/protobuf_result_adapter_test.py`: Protobuf adapter tests.
+- `src/results/protobuf_kafka_publisher_test.py`: standalone binary
+  Protobuf Kafka publish/consume test.
+- `src/pipeline/shared_gpu_frame_fanout_kafka_test.py`: DeepStream
+  shared-GPU fan-out, model execution, binary Protobuf publishing, and
+  actual Kafka consumer verification.
+- `src/results/async_kafka_publisher.py` and
+  `src/results/model_result_message.py`: retained legacy JSON publishing
+  path for compatibility and isolated tests; the active DeepStream
+  pipeline no longer uses them.
+- `src/results/kafka_publisher_test.py`: legacy JSON publisher test.
 
-The Python result queue is bounded. If it fills, `publish()` applies
-backpressure for the configured enqueue timeout and then raises `TimeoutError`
-rather than silently dropping a result.
+## Build the development image
 
-This first phase is intentionally independent of the DeepStream frame fan-out
-pipeline. The next integration step will convert each completed model result
-to `ModelResultMessage` and enqueue it to that model's publisher.
+The Dockerfile installs the Python dependencies from `requirements.txt`:
+
+```bash
+docker compose build dev
+```
+
+Rebuild only when the Dockerfile or Python dependencies change. Source
+files are bind-mounted into `/workspace`.
+
+## Run the Protobuf adapter test
+
+```bash
+docker compose run --rm dev \
+  python3 -m src.results.protobuf_result_adapter_test
+```
+
+## Run the standalone Protobuf Kafka test
+
+Make sure Kafka is healthy and the development container can reach
+`kafka:9092`, then run:
+
+```bash
+docker compose run --rm dev \
+  python3 -m src.results.protobuf_kafka_publisher_test \
+  --messages-per-model 100 \
+  --consume-timeout 60
+```
+
+This test creates unique temporary topics, publishes binary Protobuf
+messages for both models, consumes and validates them, then deletes the
+temporary topics. Add `--keep-test-topics` to retain them.
+
+## Run the full DeepStream + Protobuf pipeline
+
+Use a video file that is available inside the container under
+`/workspace`. Replace the example path with the actual MP4 path:
+
+```bash
+docker compose run --rm dev bash -lc '
+set -e
+
+python3 -m py_compile \
+  src/pipeline/shared_gpu_frame_fanout_kafka_test.py
+
+python3 -m src.pipeline.shared_gpu_frame_fanout_kafka_test \
+  --source /workspace/videos/sample.mp4 \
+  --source-id camera-01
+'
+```
+
+The `--source` path must exist inside the container. If the video is in
+the repository's `videos` directory, it will normally be available at
+`/workspace/videos/...`.
+
+The pipeline test:
+
+1. Subscribes a run-specific Kafka consumer to both result topics and
+   initializes its offsets before publishing begins.
+2. Starts one independent Protobuf publisher per model.
+3. Starts the two GPU model workers.
+4. Decodes the MP4 once and fans the shared GPU frame out to both models.
+5. Publishes each model's `InferenceResult` independently.
+6. Flushes both publishers on shutdown.
+7. Consumes the binary Protobuf messages for the current
+   `source_session_id`.
+8. Verifies message counts, model/topic identity, frame identity,
+   timestamps, detections, and pipeline timing metadata.
+
+A successful run ends with:
+
+```text
+DEEPSTREAM + TWO GPU MODELS + INDEPENDENT BINARY PROTOBUF KAFKA TEST PASSED
+```
+
+## Delivery semantics and current limitations
+
+- `acks=all` and `enable.idempotence=true` improve producer-side
+  delivery reliability. They do not make the complete inference-to-
+  database workflow exactly once.
+- Downstream consumers should deduplicate using `result_id`.
+- Publisher queues are bounded. If a queue remains full beyond its
+  configured enqueue timeout, publishing fails visibly rather than
+  silently dropping a result.
+- The MP4 test currently uses the DeepStream receiver wall-clock time for
+  `captured_at_ms`; it does not claim this is the source recording time.
+- Event-image storage and PostgreSQL persistence are not yet connected to
+  this standalone DeepStream pipeline.
+- Configurable worker pools, RTSP ingestion, and real AI models remain
+  later milestones.
