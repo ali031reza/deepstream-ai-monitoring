@@ -81,8 +81,7 @@ services:
 
 
     volumes:
-      - kafka_data:/tmp/kraft-combined-logs
-
+      - kafka_data:/tmp/kafka-data
     healthcheck:
       test:
         - CMD-SHELL
