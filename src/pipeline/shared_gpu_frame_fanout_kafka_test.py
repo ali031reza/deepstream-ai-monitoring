@@ -1,5 +1,6 @@
 
 
+
 """
 DeepStream shared GPU frame fan-out with independent binary Protobuf publishers.
 
@@ -1117,6 +1118,15 @@ def wait_for_consumer_assignment(
         assignment = consumer.assignment()
 
         if assignment:
+            # Force the new consumer group to resolve its "latest"
+            # starting offsets before publishers begin producing.
+            message = consumer.poll(0.1)
+
+            if message is not None and message.error():
+
+                if message.error().code() != KafkaError._PARTITION_EOF:
+                    raise KafkaException(message.error())
+
             return assignment
 
         message = consumer.poll(0.1)
