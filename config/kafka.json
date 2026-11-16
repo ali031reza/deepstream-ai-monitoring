@@ -22,8 +22,37 @@
       "socket.keepalive.enable": true
     }
   },
-  "consumer_test": {
-    "poll_timeout_seconds": 1.0,
-    "consume_timeout_seconds": 60.0
+  "results_consumer": {
+    "group_id": "deepstream-results-processor",
+    "auto_offset_reset": "earliest",
+    "poll_timeout_seconds": 0.5,
+    "session_timeout_ms": 45000,
+    "max_poll_interval_ms": 900000
+  },
+  "batch_processing": {
+    "batch_size": 100,
+    "flush_interval_ms": 50,
+    "queue_capacity": 300,
+    "retry_attempts": 3,
+    "retry_backoff_ms": 250,
+    "shutdown_timeout_seconds": 180
+  },
+  "dead_letter": {
+    "topic": "inference-dead-letter",
+    "flush_timeout_seconds": 15
+  },
+  "database": {
+    "host": "host.docker.internal",
+    "port": 5432,
+    "dbname": "ai_monitoring",
+    "user": "ai_app",
+    "password_env": "DATABASE_PASSWORD",
+    "connect_timeout": 5
+  },
+  "kafka_admin": {
+    "partitions": 3,
+    "replication_factor": 1,
+    "retention_ms": 604800000,
+    "request_timeout_seconds": 30
   }
 }

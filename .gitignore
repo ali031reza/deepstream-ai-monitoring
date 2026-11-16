@@ -33,3 +33,7 @@ id_ed25519*
 # Generated files
 .DS_Store
 Thumbs.db
+
+# Generated runtime data
+artifacts/event_frames/
+artifacts/benchmarks/
