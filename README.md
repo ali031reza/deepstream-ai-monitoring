@@ -280,10 +280,12 @@ for the full hardware integration check.
 
 - `yolo.confidence` controls which detections enter the result.
   `event_frames.minimum_confidence` independently controls whether a
-  sampled frame is saved as a meaningful event.
-- The current event rule is one configured class (COCO class 0, person)
-  meeting the event threshold. There is no cross-frame tracking or event
-  deduplication beyond one saved JPEG per source frame.
+  sampled frame is saved as a meaningful event. `tensorrt_pipeline.event_every_nth_sample`
+  controls image-write decimation without reducing inference sampling FPS.
+- The current event rule is the configured detection class (default `person`,
+  COCO class 0) meeting the event threshold. `tensorrt_pipeline.event_every_nth_sample`
+  defaults to `1`, so every qualifying sampled frame is saved. Increase it to
+  decimate event-image writes; no cross-frame tracking is implemented.
 - The worker copies each sampled GPU frame to host memory for PIL
   letterboxing, then transfers the model input to TensorRT. TensorRT
   inference itself runs on the GPU. This is a simple, testable first

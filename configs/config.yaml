@@ -138,5 +138,7 @@ tensorrt_pipeline:
   engine: artifacts/models/yolo11n_fp16.engine
   sample_fps: 8.0
   fallback_source_fps: 30.0
+  detection_class: person
+  event_every_nth_sample: 1
   event_type: person_detected
   result_root: artifacts/results/yolo11n-person

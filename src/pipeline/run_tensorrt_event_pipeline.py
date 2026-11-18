@@ -65,6 +65,8 @@ class TensorRTEventPipelineOptions:
     engine_path: Path
     event_root: Path
     event_min_confidence: float
+    detection_class: str
+    event_every_nth_sample: int
     event_type: str
     result_topic: str
     kafka_bootstrap_servers: str
@@ -83,6 +85,10 @@ class TensorRTEventPipelineOptions:
             raise ValueError("sample_fps and fallback_source_fps must be positive")
         if not 0 <= self.event_min_confidence <= 1:
             raise ValueError("event_min_confidence must be in [0, 1]")
+        if not self.detection_class.strip():
+            raise ValueError("detection_class is required")
+        if self.event_every_nth_sample < 1:
+            raise ValueError("event_every_nth_sample must be >= 1")
         if not self.event_type.strip() or not self.result_topic.strip():
             raise ValueError("event_type and result_topic are required")
         if not self.kafka_bootstrap_servers.strip():
@@ -431,9 +437,14 @@ class TensorRTEventWorker:
             qualifying = [
                 item for item in inference.detections
                 if item.class_id in self.settings.yolo.classes
+                and item.class_name.casefold() == self.options.detection_class.casefold()
                 and item.confidence >= self.options.event_min_confidence
             ]
-            is_event = self.settings.events.enabled and bool(qualifying)
+            is_event = (
+                self.settings.events.enabled
+                and bool(qualifying)
+                and packet.sample_index % self.options.event_every_nth_sample == 0
+            )
 
             processed_at_ms = time.time_ns() // 1_000_000
             image = None
@@ -995,6 +1006,8 @@ class TensorRTEventPipelineApplication:
                 detections_total / len(worker.results) if worker.results else 0.0
             ),
             "event_min_confidence": self.options.event_min_confidence,
+            "detection_class": self.options.detection_class,
+            "event_every_nth_sample": self.options.event_every_nth_sample,
             "model_load_ms": worker.model_load_ms,
             "elapsed_seconds": elapsed_seconds,
             "end_to_end_sampled_fps": (
@@ -1105,6 +1118,13 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
         default=settings.events.minimum_confidence,
     )
     parser.add_argument(
+        "--detection-class", default=str(raw.get("detection_class", "person"))
+    )
+    parser.add_argument(
+        "--event-every-nth-sample", type=positive_int,
+        default=positive_int(str(raw.get("event_every_nth_sample", 1))),
+    )
+    parser.add_argument(
         "--event-type", default=str(raw.get("event_type", "person_detected"))
     )
     parser.add_argument("--topic", default=default_topic)
@@ -1144,6 +1164,8 @@ def main(argv: list[str] | None = None) -> None:
         engine_path=settings.paths.resolve(args.engine),
         event_root=settings.paths.resolve(args.event_root),
         event_min_confidence=args.event_min_confidence,
+        detection_class=args.detection_class,
+        event_every_nth_sample=args.event_every_nth_sample,
         event_type=args.event_type,
         result_topic=args.topic,
         kafka_bootstrap_servers=args.kafka_bootstrap_servers,
