@@ -2,9 +2,37 @@
 
 Run one local video from its first frame to end of stream. DeepStream samples decoded frames, YOLO11n identifies people, and each sampled frame produces one Kafka message and one PostgreSQL result. Qualifying event frames also produce a clean JPEG, a boxed JPEG and one JSON sidecar. A session report reconciles these outputs and measures throughput at each stage.
 
+## Pipeline block diagram
+
+```mermaid
+flowchart TD
+    clip["Local video"] --> decode["DeepStream decode"]
+    decode --> sample["Sample by presentation timestamp"]
+    sample -->|Selected frames| infer["YOLO11n · TensorRT FP16"]
+    infer --> event{"Save this frame as an event?"}
+    event -->|Yes| files["Write clean JPEG, boxed JPEG and JSON"]
+    event -->|No| record["Append sample to JSONL manifest"]
+    files --> record
+    record --> kafka["Publish Protobuf result to Kafka"]
+    kafka --> writer["Results processor"]
+    writer --> db["PostgreSQL"]
+    kafka --> replay["Verify session messages and event files"]
+    files -.-> replay
+    replay --> report["End-to-end session report"]
+    db -->|Verify rows and image references| report
+```
+
+At the default settings, a sampled frame becomes an event when at least one person has confidence **≥ 0.65**. Multiple people in one frame produce one event, with a box around each qualifying person. Both paths through the decision produce one result for the sample. The supervisor starts the results consumer and waits for its Kafka assignment before starting the video.
+
 ## Run the Paris walk
 
-From the project root in WSL, use the existing video at `videos/reliability/paris_city_walk.mp4`, GPU-compatible engine at `artifacts/models/yolo11n_fp16.engine`, and project `.env`. The defaults match the 1920 × 1080, 60 FPS source and sample it at 8 FPS. Docker Compose needs NVIDIA GPU access. PostgreSQL runs outside this Compose project. It must be reachable with the application's credentials and have the existing base schema, event_images table and DeepStream metadata migration applied. The runner checks the schema before decoding.
+Run these commands from the project root in WSL. The defaults sample the 1920 × 1080, 60 FPS Paris clip at 8 FPS.
+
+| Prerequisite | What the runner expects |
+|---|---|
+| Input video | `videos/reliability/paris_city_walk.mp4` |
+| GPU and engine | Docker Compose with NVIDIA GPU access and a compatible `artifacts/models/yolo11n_fp16.engine` |
+| Database | A project `.env` with the application credentials for the external PostgreSQL instance. The base schema, `event_images` table and DeepStream metadata migration must be in place. The runner checks them before decoding. |
 
 ```bash
 docker compose up -d --wait kafka
@@ -17,7 +45,7 @@ A zero exit code and the final PASS confirm a completed run. For a different cli
 
 For a fresh environment, copy `.env.example` to `.env`, supply the PostgreSQL application password and connection settings, and run `docker compose build dev`. If the local engine needs rebuilding, place YOLO11n weights in `artifacts/models/yolo11n.pt`, run `python -m tools.export_yolo11n_onnx` in a Python environment with `requirements-yolo.txt` installed, then run `docker compose run --rm --no-deps dev python3 -m tools.build_yolo11n_tensorrt_engine` on the target GPU. A compatible existing engine skips these preparation steps.
 
-## Outputs
+## Find the images and reports
 
 | Output under the project directory | Contents |
 |---|---|
@@ -29,7 +57,17 @@ For a fresh environment, copy `.env.example` to `.env`, supply the PostgreSQL ap
 | `artifacts/benchmarks/processor_<session>.json` | Drained Kafka consumer and PostgreSQL writer counters |
 | `artifacts/benchmarks/tensorrt_end_to_end_<session>.json` | Final frame counts, stage throughput, verified database rows and unique images |
 
-The frame summary distinguishes **decoded**, **sampled**, **skipped**, **qualifying**, **event_frames**, **images_written**, **images_reused** and **verified_images**. A qualifying frame has at least one person detection above the configured event threshold (default 0.65, inclusive). It counts once even when several people appear. The event policy can save every Nth sample if it qualifies. The default N is 1. Kafka and PostgreSQL reference the clean JPEG. The sidecar and manifest link both versions, and the Kafka verification pass checks both JPEG hashes. The report counts boxed writes and reuses separately. Each manifest entry links a stored frame to its source sequence and PTS.
+Use the session ID printed by the launcher to match the report to its images. Kafka and PostgreSQL reference the clean JPEG. The manifest and sidecar link both JPEGs, and the Kafka verification pass checks both hashes.
+
+### Read the frame counts
+
+| Report fields | How to interpret them |
+|---|---|
+| `decoded`, `sampled`, `skipped` | For a full run, decoded frames should equal sampled plus skipped. Compare decoded with the source frame count to check video coverage. |
+| `qualifying`, `event_frames` | Qualifying counts samples that meet the detection threshold. Event frames also satisfy the storage policy. By default, every qualifying sample is saved. |
+| `images_written`, `images_reused` | Clean JPEGs written or reused for this session. |
+| `boxed_images_written`, `boxed_images_reused` | Corresponding boxed JPEGs written or reused. Each event has one JPEG of each kind. |
+| `verified_images` | Unique clean JPEGs verified through PostgreSQL references. |
 
 ## Interpreting throughput
 
