@@ -130,8 +130,8 @@ requirements-yolo.txt and is not part of CPU-only CI.
 - The original mock DeepStream pipeline still uses synthetic detections.
 - The YOLO11n TensorRT runner is a separate one-camera real-model path and
   publishes Protobuf results to Kafka after writing qualifying JPEG/JSON files.
-- The existing results processor can persist the new model's results to
-  PostgreSQL when its schema/migration and database connection are available.
+- run_tensorrt_end_to_end supervises the existing results processor and verifies
+  the exact TensorRT session in PostgreSQL before reporting success.
 - The first integrated source is an MP4 file; RTSP reconnects and camera-origin
   wall-clock timestamps remain later work.
 - The old two-model fan-out and event-persistence runners remain reference
@@ -246,26 +246,59 @@ For a full video run, omit `--max-samples 120`. Kafka topic
 The runner verifies that every sampled frame result was delivered and that
 each event message references an existing JPEG and JSON sidecar.
 
-### 4. Optional: persist Kafka results into PostgreSQL
+### 4. Run the complete TensorRT -> Kafka -> PostgreSQL pipeline
 
-The existing `src.results.run_results_processor` consumes all configured
-result topics, validates Protobuf messages, and persists inference metadata
-and event-image references using `DatabaseBatchRepository`. Because
-`yolo11n-person` is now in the Kafka topic map, the existing processor
-includes this model without a second consumer implementation.
+The one-command supervisor starts the existing results processor before
+inference, waits for its Kafka consumer group to become stable, runs the
+DeepStream/TensorRT producer, waits for the exact run's PostgreSQL rows, checks
+all referenced JPEG hashes, and then stops the results processor gracefully.
 
-First ensure the existing PostgreSQL schema and migration
-`infra/postgres/migrations/003_deepstream_result_metadata.sql` are applied,
-and configure the database password in `.env`. Then start the processor in
-a second terminal:
+Ensure PostgreSQL is running and the project-root .env contains
+DATABASE_PASSWORD. It must be the password assigned to the PostgreSQL role
+DATABASE_USER (normally ai_app), not the PostgreSQL bootstrap/admin password
+unless both passwords were deliberately set to the same value. The dev
+container receives this .env through Docker Compose. The database must have
+the existing base schema and
+infra/postgres/migrations/003_deepstream_result_metadata.sql applied.
+
+Run the entire video:
 
     docker compose run --rm dev \
-      python3 -m src.results.run_results_processor
+      python3 -m src.pipeline.run_tensorrt_end_to_end \
+      --source /workspace/videos/TEST.mp4 \
+      --camera-id camera-01 \
+      --sample-fps 8
 
-The database processor uses the configured `DATABASE_HOST`,
-`DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USER`, and password
-environment variables. The current compose file starts Kafka, not PostgreSQL;
-a reachable PostgreSQL instance is still required for this optional stage.
+Optional runtime controls can be appended to the same command:
+
+    --db-timeout 180
+    --processor-startup-timeout 60
+    --event-min-confidence 0.65
+    --event-every-nth-sample 1
+    --queue-size 4
+
+The last three options are producer options and are passed through to
+run_tensorrt_event_pipeline. The supervisor creates a fresh session UUID and
+a dedicated Kafka consumer group for each run. It does not delete Kafka
+messages, PostgreSQL rows, event images, or prior reports.
+
+The run writes:
+
+- artifacts/event_frames/: original decoded event JPEGs and JSON sidecars.
+- artifacts/results/yolo11n-person/<session>/results.jsonl: one result manifest
+  entry per sampled frame.
+- artifacts/results/yolo11n-person/<session>/performance.json: DeepStream,
+  metadata-probe, frame-retrieval, TensorRT and Kafka metrics.
+- artifacts/benchmarks/tensorrt_end_to_end_<session>.json: producer summary
+  plus verified PostgreSQL counts and event-image integrity.
+
+A successful run ends with:
+
+    PASS: DeepStream -> YOLO11n TensorRT -> event JPEG/JSON -> Kafka -> PostgreSQL
+
+The lower-level run_tensorrt_event_pipeline command remains available when
+only producer/Kafka verification is desired. Use run_tensorrt_end_to_end for
+the complete application lifecycle.
 
 ### 5. CPU-only tests and syntax checks
 
