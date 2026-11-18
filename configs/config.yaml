@@ -67,6 +67,7 @@ kafka:
   topics:
     mock_model_a: model-a-results
     mock_model_b: model-b-results
+    yolo11n-person: yolo11n-person-results
   publisher:
     queue_maxsize: 128
     max_batch_messages: 32
@@ -129,3 +130,13 @@ yolo:
   output_directory: artifacts/videos
   run_name: yolo11n-person-detection
   save_video: true
+
+
+# DeepStream -> TensorRT YOLO11n event pipeline.
+# The engine is generated locally for the target GPU and DeepStream TensorRT runtime.
+tensorrt_pipeline:
+  engine: artifacts/models/yolo11n_fp16.engine
+  sample_fps: 8.0
+  fallback_source_fps: 30.0
+  event_type: person_detected
+  result_root: artifacts/results/yolo11n-person
