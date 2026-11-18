@@ -168,6 +168,36 @@ Open the [local MinIO console](http://localhost:9001). Sign in as `camera-store`
 
 The object URI is `s3://` + `event_bucket` + `/` + `clean_key` or `boxed_key`.
 
+## See the throughput
+
+A finished run prints `COMPLETE TENSORRT END-TO-END PIPELINE REPORT` with one line per stage. The same numbers are stored in `artifacts/benchmarks/tensorrt_end_to_end_<session>.json` under `throughput`. The filename is the session id. Each stage has `per_second`, `count`, `seconds`, `unit`, and `window`. `per_second` is `count / seconds`. A zero-length window is `null`.
+
+The console log is not required. From the project root, read the newest report:
+
+```bash
+jq '.source_session_id, .throughput' "$(ls -t artifacts/benchmarks/tensorrt_end_to_end_*.json | head -1)"
+```
+
+### Measured rates
+
+Paris walk, session `848193b7f0074ccb93cc2085ebe4201f`, 1920×1080 at 8 FPS. **End-to-end throughput is 21.22 verified samples/s** over 459.7 seconds (9,756 samples).
+
+| Stage | Throughput | Work | Time |
+|---|---:|---:|---:|
+| DeepStream decode | 177.03 frames/s | 73,169 frames | 413.3 s |
+| Sampling | 23.60 samples/s | 9,756 samples | 413.3 s |
+| Preprocess | 73.44 samples/s | 9,756 samples | 132.9 s |
+| Host-to-device copy | 1,263.94 samples/s | 9,756 samples | 7.7 s |
+| TensorRT | 198.87 samples/s | 9,756 samples | 49.1 s |
+| Postprocess | 579.67 samples/s | 9,756 samples | 16.8 s |
+| Result manifest | 185.71 samples/s | 9,756 samples | 52.5 s |
+| Event storage | 24.21 events/s | 3,573 events | 147.6 s |
+| Kafka delivery | 23.60 messages/s | 9,756 messages | 413.4 s |
+| Kafka verification | 430.91 messages/s | 9,756 messages | 22.6 s |
+| Consumer validation | 10,910.22 messages/s | 9,756 messages | 0.9 s |
+| PostgreSQL writes | 81.19 rows/s | 3,573 rows | 44.0 s |
+| End to end | 21.22 verified samples/s | 9,756 samples | 459.7 s |
+
 ## Interpreting throughput
 
 Every measurement includes a count, seconds, unit, and timing window. Average throughput is completed items divided by measured seconds. Stages overlap: the bounded TensorRT input queue can slow capture while inference or disk I/O catches up. Kafka publisher and PostgreSQL writer metrics are batch-oriented.
