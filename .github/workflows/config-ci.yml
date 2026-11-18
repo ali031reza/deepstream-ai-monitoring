@@ -3,7 +3,7 @@ name: Configuration and Python syntax
 on:
   pull_request:
   push:
-    branches: [DeepStream_Pipeline, "refactor/**"]
+    branches: [DeepStream_Pipeline, "refactor/**", "one-model-one-camera"]
 
 jobs:
   config-tests:
