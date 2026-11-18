@@ -115,3 +115,40 @@ def test_configuration_rejects_two_enabled_models(tmp_path):
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="exactly one enabled model"):
         ConfigurationLoader().load(path)
+
+
+
+def test_yolo_settings_are_typed_and_paths_are_repository_relative(monkeypatch):
+    monkeypatch.delenv("APP_CONFIG_PATH", raising=False)
+    settings = load_settings()
+
+    assert settings.yolo.model_id == "yolo11n-person"
+    assert settings.yolo.source == settings.paths.resolve("videos/TEST.mp4")
+    assert settings.yolo.weights == settings.paths.resolve("artifacts/models/yolo11n.pt")
+    assert settings.yolo.classes == (0,)
+    assert settings.yolo.gpu_id == 0
+    assert settings.yolo.image_size == 640
+    assert settings.yolo.half is True
+    assert settings.yolo.output_directory == settings.paths.resolve("artifacts/videos")
+
+
+def test_yolo_configuration_rejects_invalid_confidence(tmp_path):
+    source = ProjectPaths.from_environment().config_file
+    raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    raw["yolo"]["confidence"] = 1.1
+    path = tmp_path / "invalid-yolo-confidence.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="yolo.confidence"):
+        ConfigurationLoader().load(path)
+
+
+def test_yolo_configuration_rejects_empty_class_filter(tmp_path):
+    source = ProjectPaths.from_environment().config_file
+    raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    raw["yolo"]["classes"] = []
+    path = tmp_path / "empty-yolo-classes.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="yolo.classes"):
+        ConfigurationLoader().load(path)

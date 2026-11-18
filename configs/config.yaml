@@ -112,3 +112,20 @@ database:
   user: ai_app
   password_env: DATABASE_PASSWORD
   connect_timeout: 5
+
+# Standalone pretrained YOLO11n person-detection experiment.
+# Model weights and generated media live under ignored artifacts/.
+yolo:
+  model_id: yolo11n-person
+  source: videos/TEST.mp4
+  weights: artifacts/models/yolo11n.pt
+  gpu_id: 0
+  image_size: 640
+  confidence: 0.35
+  iou: 0.45
+  classes: [0]                 # COCO class 0 = person
+  half: true                   # FP16 inference
+  max_detections: 300
+  output_directory: artifacts/videos
+  run_name: yolo11n-person-detection
+  save_video: true

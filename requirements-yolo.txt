@@ -1,0 +1,6 @@
+--extra-index-url https://download.pytorch.org/whl/cu132
+
+# Versions verified in the WSL RTX 3050 YOLO11n environment.
+torch==2.14.1+cu132
+torchvision==0.29.1+cu132
+ultralytics==8.4.215

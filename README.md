@@ -1,11 +1,12 @@
-# DeepStream AI Monitoring — one camera, one mock model
+# DeepStream AI Monitoring — one camera, one model
 
-This branch is the first single-camera / single-model milestone. It intentionally
-runs one MP4 source, one mock GPU model, and one Kafka result topic. It does not
-yet add RTSP camera ingestion, real model weights, PostgreSQL persistence, or
-event-image storage.
+This branch maintains the validated one-camera / one-model DeepStream mock
+pipeline and adds a standalone pretrained YOLO11n person-detection experiment.
+The standalone YOLO test runs in the WSL Python environment; the existing
+DeepStream Docker image remains unchanged until its PyTorch/TensorRT runtime
+compatibility is verified.
 
-## Active test architecture
+## Active DeepStream mock architecture
 
     One MP4 source (camera-01)
             |
@@ -24,27 +25,71 @@ event-image storage.
     Run-scoped Kafka consumer verifies every result
 
 The default configuration enables model_a and disables model_b. The
-configuration loader rejects zero or two enabled models. This is deliberate:
-the active branch must have exactly one configured model.
+configuration loader rejects zero or two enabled mock models. This remains
+the validated DeepStream/Kafka baseline.
 
-Mock detections are synthetic and marked synthetic=true. This test validates
-the GPU execution path, frame ownership, result contract, and Kafka delivery;
-it does not measure real-world AI accuracy.
+## Standalone real-model experiment: YOLO11n
 
-## Configuration
+The branch also contains a separate real-model video test:
 
-- configs/config.yaml: one enabled model, source, GPU, bounded input queue,
-  Kafka publisher, and topic settings.
-- configs/settings.py: typed dataclasses and validation.
-- configs/paths.py: repository-root-aware pathlib paths.
-- .env.example: local environment template. Copy it to .env if needed.
-- src/pipeline/single_model_camera_test.py: active one-camera / one-model
-  DeepStream + Kafka integration test.
+    videos/TEST.mp4
+            |
+    Ultralytics YOLO11n (pretrained COCO weights)
+            |
+    CUDA GPU 0, FP16, 640 x 640
+            |
+    COCO class 0 only (person)
+            |
+    Annotated video + performance.json
 
-The current test source is an MP4 file. The camera_id identifies the logical
-camera in results; RTSP connection and reconnect behavior are a later milestone.
+The default settings are in the yolo section of configs/config.yaml.
+Weights are downloaded automatically to artifacts/models/yolo11n.pt.
+Annotated videos and performance reports are written under
+artifacts/videos/. The entire artifacts/ directory is ignored by Git;
+model weights and generated media are not committed.
 
-## Start Kafka and create the active topic
+### Install the tested WSL YOLO environment
+
+Use the existing dedicated virtual environment:
+
+    source "$HOME/.venvs/yolo11n/bin/activate"
+    cd /mnt/d/projects/deepstream-ai-monitoring
+    python -m pip install -r requirements-yolo.txt
+
+The requirements file pins the versions verified on the RTX 3050:
+PyTorch 2.14.1+cu132, Torchvision 0.29.1+cu132, and Ultralytics 8.4.215.
+
+### Run person detection
+
+    python -m src.pipeline.run_yolo11n_video
+
+The source defaults to videos/TEST.mp4. To select another video:
+
+    python -m src.pipeline.run_yolo11n_video --source /absolute/path/to/video.mp4
+
+Expected output:
+
+- Model weights: artifacts/models/yolo11n.pt
+- Annotated video: artifacts/videos/yolo11n-person-detection/
+- Performance report: artifacts/videos/yolo11n-person-detection/performance.json
+
+The report records processed frames, total detections, model-load time,
+preprocess/inference/postprocess timings, end-to-end FPS, inference FPS,
+GPU identity, and peak CUDA memory.
+
+### Important boundary
+
+This standalone test uses Ultralytics/PyTorch and confirms that YOLO11n
+executes on the CUDA GPU. It does not yet replace the mock model inside
+DeepStream. The current dev container has CuPy but does not have PyTorch,
+Torchvision, Ultralytics, OpenCV, or the TensorRT Python module. Do not add
+PyTorch blindly to the DeepStream image. First verify the container's CUDA,
+Python, and TensorRT compatibility, then choose the production integration
+path (PyTorch in-container or TensorRT/DeepStream inference).
+
+## Existing DeepStream/Kafka mock test
+
+Start Kafka and create the active result topic:
 
     docker compose up -d kafka
 
@@ -54,33 +99,17 @@ camera in results; RTSP connection and reconnect behavior are a later milestone.
       --topic model-a-results \
       --partitions 3 --replication-factor 1
 
-## Build the DeepStream container
+Build the DeepStream container:
 
     docker compose build dev
     docker compose run --rm dev nvidia-smi
 
-## Run the one-model mock test
-
-Use a video file that exists inside /workspace. For the local test video:
+Run the one-camera / one-mock-model test:
 
     docker compose run --rm dev \
       python3 -m src.pipeline.single_model_camera_test \
       --source /workspace/videos/TEST.mp4 \
       --source-id camera-01
-
-The test:
-
-1. Starts one run-scoped Kafka verifier on model-a-results.
-2. Initializes one mock model on the selected GPU and one CUDA stream.
-3. Decodes the video once through DeepStream.
-4. Clones each frame once and submits it to the single model queue.
-5. Runs synthetic GPU inference and builds the backend InferenceResult
-   Protobuf message.
-6. Publishes each result asynchronously to the one configured Kafka topic.
-7. Flushes the publisher and consumes the messages for the current session.
-8. Verifies frame sequence, camera ID, model ID, result IDs, timestamps,
-   detections, and timing metadata.
-9. Checks that every cloned GPU frame is released.
 
 A successful run ends with:
 
@@ -96,21 +125,17 @@ A successful run ends with:
       src/pipeline/run_event_pipeline_test.py \
       src/results/protobuf_result_adapter_test.py
 
+The YOLO test itself requires the optional GPU dependencies in
+requirements-yolo.txt and is not part of CPU-only CI.
+
 ## Current boundaries
 
-- The mock model generates synthetic detections; no trained weights are loaded.
-- The initial camera source is an MP4 file, not RTSP.
-- Only one enabled model and one worker are supported by this first test.
-- Kafka publication is verified; PostgreSQL persistence and JPEG event storage
-  are not connected to this standalone single-model test.
+- The mock DeepStream pipeline still uses synthetic detections.
+- YOLO11n is a standalone real-model video test, not yet connected to
+  DeepStream frame retrieval or Kafka.
+- The camera source is an MP4 file; RTSP support is a later milestone.
+- PostgreSQL persistence and event-image storage are not connected to the
+  standalone YOLO runner.
 - The old two-model fan-out, event-persistence, and PostgreSQL end-to-end
-  entry points are retained for reference but guarded against accidental use
-  with this branch's one-model configuration.
-- The GPU frame dispatcher uses a blocking bounded queue. Sustained overload
-  can backpressure DeepStream decode.
-- MP4 capture timestamps use DeepStream receiver wall-clock time, not the
-  original recording timestamp.
-
-Do not interpret a passing mock test as model-accuracy validation. The next
-discussion can cover the real model interface and actual camera/RTSP source
-after this one-model baseline is verified on the target GPU.
+  entry points remain reference workflows and are guarded against accidental
+  use with this branch's one-model configuration.

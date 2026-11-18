@@ -66,6 +66,43 @@ class ModelSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class YoloSettings:
+    """Runtime settings for the standalone pretrained YOLO11n experiment."""
+
+    model_id: str
+    source: Path
+    weights: Path
+    gpu_id: int
+    image_size: int
+    confidence: float
+    iou: float
+    classes: tuple[int, ...]
+    half: bool
+    max_detections: int
+    output_directory: Path
+    run_name: str
+    save_video: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.model_id.strip():
+            raise ValueError("yolo.model_id must not be empty")
+        _positive(self.gpu_id, "yolo.gpu_id", allow_zero=True)
+        _positive(self.image_size, "yolo.image_size")
+        _positive(self.max_detections, "yolo.max_detections")
+        for name, value in (("confidence", self.confidence), ("iou", self.iou)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 1:
+                raise ValueError(f"yolo.{name} must be between 0 and 1")
+        if not self.classes:
+            raise ValueError("yolo.classes must contain at least one class ID")
+        for class_id in self.classes:
+            _positive(class_id, "yolo.classes[]", allow_zero=True)
+        if not isinstance(self.half, bool) or not isinstance(self.save_video, bool):
+            raise ValueError("yolo.half and yolo.save_video must be booleans")
+        if not self.run_name.strip() or "/" in self.run_name or "\\" in self.run_name:
+            raise ValueError("yolo.run_name must be a nonempty directory name")
+
+
+@dataclass(frozen=True, slots=True)
 class QueueSettings:
     model_input_capacity: int
     overflow_policy: str
@@ -182,6 +219,7 @@ class AppSettings:
     gpu_id: int
     sample_limit: int
     models: dict[str, ModelSettings]
+    yolo: YoloSettings
     queues: QueueSettings
     events: EventSettings
     kafka: KafkaSettings
@@ -216,6 +254,25 @@ class ConfigurationLoader:
         enabled_models = [model for model in models.values() if model.enabled]
         if len(enabled_models) != 1:
             raise ValueError("This branch requires exactly one enabled model in models")
+        yolo_data = _section(raw, "yolo")
+        class_ids = yolo_data.get("classes", [0])
+        if not isinstance(class_ids, list):
+            raise ValueError("yolo.classes must be a YAML list of class IDs")
+        yolo = YoloSettings(
+            model_id=yolo_data["model_id"],
+            source=self.paths.resolve(yolo_data["source"]),
+            weights=self.paths.resolve(yolo_data["weights"]),
+            gpu_id=_positive(yolo_data["gpu_id"], "yolo.gpu_id", allow_zero=True),
+            image_size=_positive(yolo_data["image_size"], "yolo.image_size"),
+            confidence=float(yolo_data["confidence"]),
+            iou=float(yolo_data["iou"]),
+            classes=tuple(class_ids),
+            half=yolo_data["half"],
+            max_detections=_positive(yolo_data["max_detections"], "yolo.max_detections"),
+            output_directory=self.paths.resolve(yolo_data["output_directory"]),
+            run_name=yolo_data["run_name"],
+            save_video=yolo_data.get("save_video", True),
+        )
         queue = QueueSettings(**_section(raw, "queues"))
         event_data = _section(raw, "event_frames")
         events = EventSettings(
@@ -248,7 +305,7 @@ class ConfigurationLoader:
             paths=self.paths, source=source,
             gpu_id=_positive(pipeline.get("gpu_id", 0), "pipeline.gpu_id", allow_zero=True),
             sample_limit=_positive(pipeline.get("sample_limit", 5), "pipeline.sample_limit", allow_zero=True),
-            models=models, queues=queue, events=events,
+            models=models, yolo=yolo, queues=queue, events=events,
             kafka=kafka, database=db, benchmark=benchmark,
             resource_interval_seconds=interval,
             metrics_directory=self.paths.resolve(monitoring["metrics_directory"]),
