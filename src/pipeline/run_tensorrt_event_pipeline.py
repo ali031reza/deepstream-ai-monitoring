@@ -62,6 +62,8 @@ class TensorRTEventPipelineOptions:
     sample_fps: float
     fallback_source_fps: float
     queue_size: int
+    batch_width: int
+    batch_height: int
     engine_path: Path
     event_root: Path
     event_min_confidence: float
@@ -81,6 +83,8 @@ class TensorRTEventPipelineOptions:
             raise ValueError("camera_id must contain 1-50 characters")
         if self.gpu_id < 0 or self.queue_size < 1:
             raise ValueError("gpu_id must be nonnegative and queue_size positive")
+        if self.batch_width < 1 or self.batch_height < 1:
+            raise ValueError("DeepStream batch width and height must be positive")
         if self.sample_fps <= 0 or self.fallback_source_fps <= 0:
             raise ValueError("sample_fps and fallback_source_fps must be positive")
         if not 0 <= self.event_min_confidence <= 1:
@@ -894,6 +898,10 @@ class TensorRTEventPipelineApplication:
         print(f"Session ID: {self.options.session_id}")
         print(f"Engine: {self.options.engine_path}")
         print(f"GPU: {self.options.gpu_id}")
+        print(
+            f"DeepStream batch: 1 x {self.options.batch_width} x "
+            f"{self.options.batch_height}"
+        )
         print(f"Sampling FPS: {self.options.sample_fps:.3f}")
         print(f"Sample interval: {1000.0 / self.options.sample_fps:.2f} ms")
         print(f"Fallback source FPS: {self.options.fallback_source_fps:.3f}")
@@ -925,6 +933,14 @@ class TensorRTEventPipelineApplication:
             flow = (
                 Flow(Pipeline("one-camera-tensorrt-event-pipeline"))
                 .capture([str(self.options.source)], gpu_id=self.options.gpu_id)
+                # The batch stage creates NvDsBatchMeta/FrameMeta, including
+                # frame_number, batch_id and source PTS used by the 8 FPS sampler.
+                # For this one-camera pipeline, batch_size is intentionally 1.
+                .batch(
+                    batch_size=1,
+                    width=self.options.batch_width,
+                    height=self.options.batch_height,
+                )
                 .retrieve(retriever)
             )
             started = time.perf_counter()
@@ -1107,6 +1123,18 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
         default=settings.queues.model_input_capacity,
     )
     parser.add_argument(
+        "--batch-width",
+        type=positive_int,
+        default=positive_int(str(raw.get("batch_width", 1280))),
+        help="DeepStream batched frame width; match source resolution to avoid resizing",
+    )
+    parser.add_argument(
+        "--batch-height",
+        type=positive_int,
+        default=positive_int(str(raw.get("batch_height", 720))),
+        help="DeepStream batched frame height; match source resolution to avoid resizing",
+    )
+    parser.add_argument(
         "--engine",
         default=str(settings.paths.resolve(raw.get(
             "engine", "artifacts/models/yolo11n_fp16.engine"
@@ -1164,6 +1192,8 @@ def main(argv: list[str] | None = None) -> None:
         sample_fps=args.sample_fps,
         fallback_source_fps=args.fallback_source_fps,
         queue_size=args.queue_size,
+        batch_width=args.batch_width,
+        batch_height=args.batch_height,
         engine_path=settings.paths.resolve(args.engine),
         event_root=settings.paths.resolve(args.event_root),
         event_min_confidence=args.event_min_confidence,

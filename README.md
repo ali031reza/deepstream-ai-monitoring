@@ -146,6 +146,8 @@ DeepStream/Kafka runner intact.
         |
     DeepStream decode once
         |
+    DeepStream batch (batch_size=1; emits NvDsBatchMeta/FrameMeta)
+        |
     PTS sampler (8 frames/second; 125 ms target interval)
         |
     YOLO11n TensorRT FP16 engine (COCO person class 0)

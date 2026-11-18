@@ -136,6 +136,10 @@ yolo:
 # The engine is generated locally for the target GPU and DeepStream TensorRT runtime.
 tensorrt_pipeline:
   engine: artifacts/models/yolo11n_fp16.engine
+  # DeepStream .batch() dimensions. TEST.mp4 is 1280x720; keep these
+  # aligned with the source resolution when preserving event-frame dimensions.
+  batch_width: 1280
+  batch_height: 720
   sample_fps: 8.0
   fallback_source_fps: 30.0
   detection_class: person
