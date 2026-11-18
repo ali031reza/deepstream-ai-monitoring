@@ -20,9 +20,7 @@ RUN python3 -m pip install \
 
 # Fail at image build time rather than discovering missing TensorRT bindings
 # after a video has been decoded.
-RUN python3 - <<'PY' \
-    && ldconfig -p | grep -q 'libnvonnxparser.so.10' \
-    && command -v trtexec
+RUN python3 - <<'PY'
 import tensorrt as trt
 
 print("TensorRT Python:", trt.__version__)
@@ -31,6 +29,9 @@ assert trt.Builder(trt.Logger()) is not None
 assert hasattr(trt, "OnnxParser")
 print("TensorRT Builder and ONNX parser bindings: OK")
 PY
+
+RUN ldconfig -p | grep -q 'libnvonnxparser.so.10' \
+    && command -v trtexec
 
 # Bypass the base image's default Triton startup.
 # We only need the DeepStream development environment.
