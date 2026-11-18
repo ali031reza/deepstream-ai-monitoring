@@ -3,7 +3,11 @@ WORKDIR /src
 RUN git clone --depth 1 --branch RELEASE.2025-10-15T17-29-55Z https://github.com/minio/minio.git . \
     && test "$(git rev-parse HEAD)" = "9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a"
 ENV CGO_ENABLED=0
-RUN flags="$(go run buildscripts/gen-ldflags.go)" \
+# The pipe also allows direct module fetches when the proxy returns HTTP 403.
+ENV GOPROXY="https://proxy.golang.org|direct"
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    flags="$(go run buildscripts/gen-ldflags.go)" \
     && go build -p 2 -tags kqueue -trimpath -ldflags "$flags" -o /out/minio .
 
 FROM debian:bookworm-slim
