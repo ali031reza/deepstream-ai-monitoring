@@ -34,7 +34,7 @@ def test_yolo_channels_first_output_filters_person_and_suppresses_duplicates():
     assert len(detections) == 1
     assert detections[0].class_id == 0
     assert detections[0].class_name == "person"
-    assert detections[0].confidence == 0.95
+    assert np.isclose(detections[0].confidence, 0.95)
     assert detections[0].bbox_normalized == (
         260.0 / 640.0,
         240.0 / 640.0,
