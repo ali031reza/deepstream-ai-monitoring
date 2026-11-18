@@ -551,17 +551,28 @@ class TensorRTEventWorker:
 
             processed_at_ms = time.time_ns() // 1_000_000
             image = None
+            boxed_metadata = None
             sidecar_path: Path | None = None
             event_storage_ms = 0.0
 
             if is_event:
                 store_started = time.perf_counter()
-                image = self.frame_store.put_rgb(
+                frame_args = dict(
                     camera_id=self.options.camera_id,
                     source_session_id=self.options.session_id,
                     frame_sequence=packet.frame_sequence,
                     rgb_array=inference.frame_rgb,
                 )
+                image = self.frame_store.put_rgb(**frame_args)
+                boxed = self.frame_store.put_rgb(
+                    **frame_args, boxes=[item.bbox_xyxy for item in qualifying]
+                )
+                boxed_metadata = {
+                    "storage_key": boxed.storage_key,
+                    "format": boxed.image_format,
+                    "size_bytes": boxed.image_size_bytes,
+                    "sha256": boxed.image_sha256,
+                }
                 event_storage_ms = (time.perf_counter() - store_started) * 1000.0
 
             result_data: dict[str, Any] = {
@@ -605,7 +616,8 @@ class TensorRTEventWorker:
             if image is not None:
                 detection_type = qualifying[0].class_name
                 event_metadata = {
-                    "schema_version": "1.0",
+                    "schema_version": "1.1",
+                    "boxed_image": boxed_metadata,
                     "event_id": message.result_id,
                     "event_type": self.options.event_type,
                     "detection_type": detection_type,
@@ -682,6 +694,7 @@ class TensorRTEventWorker:
                 "event_type": self.options.event_type if is_event else None,
                 "detection_count": len(detections),
                 "detections": detections,
+                "boxed_image": boxed_metadata,
                 "event_image": (
                     {
                         "storage_key": image.storage_key,
@@ -848,6 +861,14 @@ class KafkaEventVerifier:
                 )
                 sidecar_path = self.metadata_store.verify(result.storage_key)
                 sidecar = self.metadata_store.read(result.storage_key)
+                boxed = sidecar["boxed_image"]
+                if boxed["storage_key"] != self.frame_store.boxed_key(result.storage_key):
+                    raise AssertionError("Boxed JPEG key does not match event frame")
+                self.frame_store.verify(
+                    storage_key=boxed["storage_key"],
+                    image_size_bytes=boxed["size_bytes"],
+                    image_sha256=boxed["sha256"],
+                )
                 if sidecar.get("camera_id") != self.camera_id:
                     raise AssertionError("Event sidecar camera_id mismatch")
                 if sidecar.get("event_id") != result.result_id:

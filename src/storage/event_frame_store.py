@@ -42,7 +42,8 @@ class EventFrameStore:
         self.quality = quality
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._stats = {"saved": 0, "reused": 0, "bytes_written": 0}
+        self._stats = {"saved": 0, "reused": 0, "boxed_saved": 0, "boxed_reused": 0,
+                       "bytes_written": 0}
 
     @staticmethod
     def key(camera_id: str, source_session_id: str, frame_sequence: int) -> str:
@@ -68,14 +69,22 @@ class EventFrameStore:
             raise ValueError("JPEG storage key escapes configured root")
         return resolved
 
+    @staticmethod
+    def boxed_key(clean_key: str) -> str:
+        return str(PurePosixPath(clean_key).with_suffix(".boxed.jpg"))
+
     def put_rgb(self, *, camera_id: str, source_session_id: str,
-                frame_sequence: int, rgb_array) -> EventImage:
+                frame_sequence: int, rgb_array, boxes=None) -> EventImage:
         """Accept HxWx3 RGB uint8 numpy/CuPy-compatible image.
 
         CuPy input is explicitly copied to CPU exactly when an event qualifies.
         The caller must retain the GPU frame until this method returns.
         """
         key = self.key(camera_id, source_session_id, frame_sequence)
+        prefix = ""
+        if boxes is not None:
+            key = self.boxed_key(key)
+            prefix = "boxed_"
         target = self.path_for_key(key)
         with self._lock:
             # Lazy imports keep storage metadata/verifier tools GPU-independent.
@@ -88,8 +97,15 @@ class EventFrameStore:
                 raise ValueError("Event frame must have shape (H,W,3) and uint8 dtype")
             if array.shape[0] < 1 or array.shape[1] < 1:
                 raise ValueError("Event image is empty")
+            image = Image.fromarray(array)
+            if boxes is not None:
+                from PIL import ImageDraw
+                draw = ImageDraw.Draw(image)
+                width = max(2, round(min(image.size) / 360))
+                for x1, y1, x2, y2 in boxes:
+                    draw.rectangle((x1, y1, x2, y2), outline=(0, 255, 80), width=width)
             buf = BytesIO()
-            Image.fromarray(array, mode="RGB").save(
+            image.save(
                 buf, format="JPEG", quality=self.quality, subsampling=0,
             )
             payload = buf.getvalue()
@@ -98,7 +114,7 @@ class EventFrameStore:
                 existing = target.read_bytes()
                 if hashlib.sha256(existing).hexdigest() != digest:
                     raise ValueError(f"Image collision for {key}")
-                self._stats["reused"] += 1
+                self._stats[prefix + "reused"] += 1
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 # Exclusive unique temporary file, then atomic rename.
@@ -111,7 +127,7 @@ class EventFrameStore:
                     os.replace(temporary, target)
                 finally:
                     temporary.unlink(missing_ok=True)
-                self._stats["saved"] += 1
+                self._stats[prefix + "saved"] += 1
                 self._stats["bytes_written"] += len(payload)
         return EventImage(key, "jpeg", len(payload), digest)
 

@@ -1,6 +1,6 @@
 # DeepStream end-to-end reliability test
 
-Run one local video from its first frame to end of stream. DeepStream samples decoded frames, YOLO11n identifies people, and each sampled frame produces one Kafka message and one PostgreSQL result. Qualifying event frames also produce a JPEG and a JSON sidecar. A session report reconciles these outputs and measures throughput at each stage.
+Run one local video from its first frame to end of stream. DeepStream samples decoded frames, YOLO11n identifies people, and each sampled frame produces one Kafka message and one PostgreSQL result. Qualifying event frames also produce a clean JPEG, a boxed JPEG and one JSON sidecar. A session report reconciles these outputs and measures throughput at each stage.
 
 ## Run the Paris walk
 
@@ -22,13 +22,14 @@ For a fresh environment, copy `.env.example` to `.env`, supply the PostgreSQL ap
 | Output under the project directory | Contents |
 |---|---|
 | `artifacts/event_frames/events/<camera-hash>/<session>/<frame-sequence>.jpg` | Decoded event image at the configured batch resolution |
-| JSON beside each JPEG | Source timestamp, detection boxes and confidence, event identity, image size and SHA-256 |
+| Matching `<frame-sequence>.boxed.jpg` in the same folder | The same frame with green bounding boxes around each qualifying person |
+| `<frame-sequence>.json` beside the pair | Source timestamp, detection boxes and confidence, event identity, image size and SHA-256 |
 | `artifacts/results/yolo11n-person/<session>/results.jsonl` | One line per sampled frame, including source frame sequence, number of qualifying detections, event flag and image key |
 | `artifacts/results/yolo11n-person/<session>/performance.json` | Producer counts, throughput, publisher counters and verifier diagnostics |
 | `artifacts/benchmarks/processor_<session>.json` | Drained Kafka consumer and PostgreSQL writer counters |
 | `artifacts/benchmarks/tensorrt_end_to_end_<session>.json` | Final frame counts, stage throughput, verified database rows and unique images |
 
-The frame summary distinguishes **decoded**, **sampled**, **skipped**, **qualifying**, **event_frames**, **images_written**, **images_reused** and **verified_images**. A qualifying frame has at least one person detection above the configured event threshold (default 0.65, inclusive). It counts once even when several people appear. The event policy can save every Nth sample if it qualifies. The default N is 1. Each manifest entry links a stored frame to its source sequence and PTS.
+The frame summary distinguishes **decoded**, **sampled**, **skipped**, **qualifying**, **event_frames**, **images_written**, **images_reused** and **verified_images**. A qualifying frame has at least one person detection above the configured event threshold (default 0.65, inclusive). It counts once even when several people appear. The event policy can save every Nth sample if it qualifies. The default N is 1. Kafka and PostgreSQL reference the clean JPEG. The sidecar and manifest link both versions, and the Kafka verification pass checks both JPEG hashes. The report counts boxed writes and reuses separately. Each manifest entry links a stored frame to its source sequence and PTS.
 
 ## Interpreting throughput
 
@@ -41,7 +42,7 @@ Every measurement includes a count, seconds, unit and timing window. Average thr
 | Host-to-device transfer and TensorRT | Separate samples/s over the respective summed CUDA event times |
 | Postprocessing | Samples/s over summed output processing time |
 | Result manifest | Sample records/s over JSONL append calls |
-| Event storage | Event pairs/s over summed JPEG store and JSON write calls, including any reuse |
+| Event storage | Events/s over the clean JPEG, boxed JPEG and JSON write calls, including any reuse |
 | Kafka delivery | Acknowledged messages/s from flow start through producer drain |
 | Kafka verification | Verified messages/s during independent replay, including event-image and sidecar checks |
 | Consumer validation | Messages/s over deserialization and validation in the results processor |

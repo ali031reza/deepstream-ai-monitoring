@@ -414,6 +414,8 @@ def main(argv: list[str] | None = None) -> dict:
             "event_frames": expected_events,
             "images_written": store_stats["saved"],
             "images_reused": store_stats["reused"],
+            "boxed_images_written": store_stats["boxed_saved"],
+            "boxed_images_reused": store_stats["boxed_reused"],
             "verified_images": database_report["verified_unique_images"],
         }
         final_report = {
