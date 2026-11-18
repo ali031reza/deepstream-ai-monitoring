@@ -87,7 +87,7 @@ class YOLO11nPersonDetector:
             conf=self.settings.confidence,
             iou=self.settings.iou,
             classes=list(self.settings.classes),
-            half=self.settings.half,
+            quantize=self.settings.quantize,
             max_det=self.settings.max_detections,
             save=self.settings.save_video,
             project=str(self.settings.output_directory),

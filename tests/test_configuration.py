@@ -128,7 +128,7 @@ def test_yolo_settings_are_typed_and_paths_are_repository_relative(monkeypatch):
     assert settings.yolo.classes == (0,)
     assert settings.yolo.gpu_id == 0
     assert settings.yolo.image_size == 640
-    assert settings.yolo.half is True
+    assert settings.yolo.quantize == 16
     assert settings.yolo.output_directory == settings.paths.resolve("artifacts/videos")
 
 
@@ -151,4 +151,16 @@ def test_yolo_configuration_rejects_empty_class_filter(tmp_path):
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     with pytest.raises(ValueError, match="yolo.classes"):
+        ConfigurationLoader().load(path)
+
+
+
+def test_yolo_configuration_rejects_unsupported_quantization(tmp_path):
+    source = ProjectPaths.from_environment().config_file
+    raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    raw["yolo"]["quantize"] = 8
+    path = tmp_path / "unsupported-yolo-quantization.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="yolo.quantize"):
         ConfigurationLoader().load(path)

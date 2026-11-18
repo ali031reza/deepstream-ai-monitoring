@@ -77,7 +77,7 @@ class YoloSettings:
     confidence: float
     iou: float
     classes: tuple[int, ...]
-    half: bool
+    quantize: int
     max_detections: int
     output_directory: Path
     run_name: str
@@ -96,8 +96,10 @@ class YoloSettings:
             raise ValueError("yolo.classes must contain at least one class ID")
         for class_id in self.classes:
             _positive(class_id, "yolo.classes[]", allow_zero=True)
-        if not isinstance(self.half, bool) or not isinstance(self.save_video, bool):
-            raise ValueError("yolo.half and yolo.save_video must be booleans")
+        if self.quantize not in {16, 32}:
+            raise ValueError("yolo.quantize must be 16 (FP16) or 32 (FP32)")
+        if not isinstance(self.save_video, bool):
+            raise ValueError("yolo.save_video must be a boolean")
         if not self.run_name.strip() or "/" in self.run_name or "\\" in self.run_name:
             raise ValueError("yolo.run_name must be a nonempty directory name")
 
@@ -267,7 +269,7 @@ class ConfigurationLoader:
             confidence=float(yolo_data["confidence"]),
             iou=float(yolo_data["iou"]),
             classes=tuple(class_ids),
-            half=yolo_data["half"],
+            quantize=_positive(yolo_data["quantize"], "yolo.quantize"),
             max_detections=_positive(yolo_data["max_detections"], "yolo.max_detections"),
             output_directory=self.paths.resolve(yolo_data["output_directory"]),
             run_name=yolo_data["run_name"],

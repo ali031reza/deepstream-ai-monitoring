@@ -124,7 +124,7 @@ yolo:
   confidence: 0.35
   iou: 0.45
   classes: [0]                 # COCO class 0 = person
-  half: true                   # FP16 inference
+  quantize: 16                 # FP16 inference
   max_detections: 300
   output_directory: artifacts/videos
   run_name: yolo11n-person-detection
