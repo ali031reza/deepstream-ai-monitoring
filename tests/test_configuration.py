@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from configs.paths import ProjectPaths
-from configs.settings import ConfigurationLoader, load_settings
+from configs.settings import ConfigurationLoader, DatabaseSettings, load_settings
 from src.results.kafka_config import (
     default_config_path,
     load_kafka_config,
@@ -164,3 +164,35 @@ def test_yolo_configuration_rejects_unsupported_quantization(tmp_path):
 
     with pytest.raises(ValueError, match="yolo.quantize"):
         ConfigurationLoader().load(path)
+
+
+
+def test_database_password_requires_application_role_secret(monkeypatch):
+    monkeypatch.delenv("DATABASE_PASSWORD", raising=False)
+    monkeypatch.setenv("POSTGRES_PASSWORD", "postgres-bootstrap-secret")
+    database = DatabaseSettings(
+        host="host.docker.internal",
+        port=5432,
+        dbname="ai_monitoring",
+        user="ai_app",
+        password_env="DATABASE_PASSWORD",
+        connect_timeout=5,
+    )
+
+    with pytest.raises(ValueError, match="DATABASE_PASSWORD"):
+        database.connection_kwargs()
+
+
+def test_database_password_uses_explicit_application_role_secret(monkeypatch):
+    monkeypatch.setenv("DATABASE_PASSWORD", "application-role-secret")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "different-bootstrap-secret")
+    database = DatabaseSettings(
+        host="host.docker.internal",
+        port=5432,
+        dbname="ai_monitoring",
+        user="ai_app",
+        password_env="DATABASE_PASSWORD",
+        connect_timeout=5,
+    )
+
+    assert database.connection_kwargs()["password"] == "application-role-secret"

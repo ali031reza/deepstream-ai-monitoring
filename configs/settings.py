@@ -145,7 +145,10 @@ class DatabaseSettings:
     connect_timeout: int
 
     def connection_kwargs(self) -> dict[str, Any]:
-        secret = os.environ.get(self.password_env) or os.environ.get("POSTGRES_PASSWORD")
+        # Use the application-role secret only. POSTGRES_PASSWORD is commonly
+        # the PostgreSQL bootstrap/superuser password and must not silently be
+        # reused to authenticate as DATABASE_USER (normally ai_app).
+        secret = os.environ.get(self.password_env)
         if not secret:
             raise ValueError(f"Database password missing: set {self.password_env} in .env or environment")
         return {

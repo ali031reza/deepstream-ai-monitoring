@@ -296,9 +296,23 @@ def main(argv: list[str] | None = None) -> dict:
         kafka_config.get("kafka_admin", {}),
     ).ensure_topics()
 
-    database = DatabaseClient(**settings.database.connection_kwargs())
-    if not database.check_connection():
-        raise RuntimeError("PostgreSQL connection check failed")
+    database_config = settings.database.connection_kwargs()
+    database = DatabaseClient(**database_config)
+    try:
+        if not database.check_connection():
+            raise RuntimeError("PostgreSQL connection check failed")
+    except psycopg.OperationalError as exc:
+        if "password authentication failed" in str(exc).casefold():
+            raise RuntimeError(
+                "PostgreSQL rejected the configured application password. "
+                f"Target: {database_config['user']}@{database_config['host']}:"
+                f"{database_config['port']}/{database_config['dbname']}. "
+                f"Set {settings.database.password_env} in the project .env file "
+                f"to the password assigned to PostgreSQL role "
+                f"{database_config['user']}. Do not use POSTGRES_PASSWORD unless "
+                "it is also the password for this application role."
+            ) from exc
+        raise
     _validate_database_schema(database)
 
     environment = os.environ.copy()

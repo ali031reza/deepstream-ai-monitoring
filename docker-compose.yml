@@ -8,6 +8,11 @@ services:
     image: deepstream-ai-monitoring:dev
     container_name: deepstream-ai-monitoring-dev
 
+    # Make the same project-root .env used by configs.settings available
+    # explicitly inside the container (including DATABASE_PASSWORD).
+    env_file:
+      - .env
+
     gpus: all
 
     environment:
