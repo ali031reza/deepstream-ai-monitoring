@@ -15,6 +15,8 @@ COPY requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install \
     --no-cache-dir \
     --break-system-packages \
+    --extra-index-url https://pypi.nvidia.com \
+    --only-binary=tensorrt-cu13-libs,tensorrt-cu13-bindings \
     -r /tmp/requirements.txt \
     "tensorrt-cu13==${TENSORRT_PYTHON_VERSION}"
 
