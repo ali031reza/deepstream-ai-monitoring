@@ -3,7 +3,7 @@ name: Configuration and Python syntax
 on:
   pull_request:
   push:
-    branches: [DeepStream_Pipeline, "refactor/**", "one-model-one-camera"]
+    branches: [DeepStream_Pipeline, "refactor/**", "one-model-one-camera", "tensorrt-one-camera-event-pipeline"]
 
 jobs:
   config-tests:
@@ -17,7 +17,7 @@ jobs:
       - name: Install Python dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Compile Python sources
-        run: python -m compileall -q configs src
+        run: python -m compileall -q configs src tools
       - name: Run CPU-only unit tests
         run: |
           python -m pytest -q \
@@ -26,4 +26,8 @@ jobs:
             src/storage/verify_event_images_test.py \
             src/monitoring/metrics_test.py \
             src/pipeline/run_event_pipeline_test.py \
-            src/results/protobuf_result_adapter_test.py
+            src/results/protobuf_result_adapter_test.py \
+            tests/test_frame_sampler.py \
+            tests/test_event_metadata_store.py \
+            tests/test_tensorrt_yolo_output_decoder.py \
+            tests/test_tensorrt_result_contract.py
