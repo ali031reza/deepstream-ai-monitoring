@@ -198,25 +198,54 @@ class DeepStreamFrameRetrieverCore:
             return -1
 
         try:
-            frame_items = list(buffer.batch_meta.frame_items)
-            if not frame_items:
-                raise RuntimeError("DeepStream buffer contains no frame metadata")
+            # Keep the native BatchMetadata wrapper alive
+            # throughout the entire metadata iteration.
+            batch_meta = buffer.batch_meta
 
-            for frame_meta in frame_items:
+            if batch_meta is None:
+                raise RuntimeError(
+                    "DeepStream buffer has no batch metadata"
+                )
+
+            frame_count = 0
+
+            # IMPORTANT:
+            # Iterate directly over the native iterator.
+            # Do NOT use list(batch_meta.frame_items).
+            for frame_meta in batch_meta.frame_items:
+
+                frame_count += 1
+
                 if self.fatal_event.is_set():
                     return -1
 
+                # Access native metadata while its iterator is alive.
                 frame_number = int(frame_meta.frame_number)
-                raw_pts = getattr(frame_meta, "buffer_pts", None)
+                batch_id = int(frame_meta.batch_id)
+
+                raw_pts = getattr(
+                    frame_meta,
+                    "buffer_pts",
+                    None,
+                )
+
                 try:
-                    pts_ns = int(raw_pts) if raw_pts is not None else None
+                    pts_ns = (
+                        int(raw_pts)
+                        if raw_pts is not None
+                        else None
+                    )
                 except (TypeError, ValueError, OverflowError):
                     pts_ns = None
+
                 with self._lock:
                     self.stats.frames_seen += 1
                     sample_count = self.stats.frames_sampled
 
-                if self.max_samples is not None and sample_count >= self.max_samples:
+                if (
+                    self.max_samples is not None
+                    and sample_count >= self.max_samples
+                ):
                     with self._lock:
                         self.stats.frames_skipped += 1
                     continue
@@ -225,6 +254,7 @@ class DeepStreamFrameRetrieverCore:
                     frame_number=frame_number,
                     pts_ns=pts_ns,
                 )
+
                 if not decision.should_process:
                     with self._lock:
                         self.stats.frames_skipped += 1
@@ -234,74 +264,116 @@ class DeepStreamFrameRetrieverCore:
                 owned_tensor = None
                 gpu_array = None
                 packet = None
+
                 try:
-                    raw_tensor = buffer.extract(int(frame_meta.batch_id))
+                    # Extract the GPU frame from DeepStream.
+                    raw_tensor = buffer.extract(batch_id)
+
                     if raw_tensor is None:
                         raise RuntimeError(
-                            f"DeepStream could not extract frame {frame_number}"
+                            f"DeepStream could not extract frame "
+                            f"{frame_number}"
                         )
+
+                    # Clone the tensor to establish independent ownership.
                     owned_tensor = raw_tensor.clone()
+
                     del raw_tensor
                     raw_tensor = None
 
+                    # Convert the owned tensor into a CuPy GPU array.
                     with self.cp.cuda.Device(self.gpu_id):
+
                         device_type, device_id = tuple(
                             owned_tensor.__dlpack_device__()
                         )
-                        if (device_type, device_id) != (2, self.gpu_id):
+
+                        if (device_type, device_id) != (
+                            2,
+                            self.gpu_id,
+                        ):
                             raise RuntimeError(
-                                f"Unexpected DLPack device {(device_type, device_id)}; "
-                                f"expected CUDA device {(2, self.gpu_id)}"
+                                f"Unexpected DLPack device "
+                                f"{(device_type, device_id)}; "
+                                f"expected CUDA device "
+                                f"{(2, self.gpu_id)}"
                             )
-                        gpu_array = self.cp.from_dlpack(owned_tensor)
+
+                        gpu_array = self.cp.from_dlpack(
+                            owned_tensor
+                        )
+
                         if gpu_array.dtype != self.cp.uint8:
                             raise RuntimeError(
-                                f"Expected uint8 frame, received {gpu_array.dtype}"
+                                f"Expected uint8 frame, "
+                                f"received {gpu_array.dtype}"
                             )
-                        if gpu_array.ndim != 3 or gpu_array.shape[2] != 3:
+
+                        if (
+                            gpu_array.ndim != 3
+                            or gpu_array.shape[2] != 3
+                        ):
                             raise RuntimeError(
-                                f"Expected RGB HxWx3 frame, got {gpu_array.shape}"
+                                f"Expected RGB HxWx3 frame, "
+                                f"got {gpu_array.shape}"
                             )
+
                         self.cp.cuda.runtime.deviceSynchronize()
 
                     with self._lock:
                         sample_index = self.stats.frames_sampled
 
+                    # Build the frame packet.
                     packet = FramePacket(
                         frame_sequence=frame_number,
                         sample_index=sample_index,
                         source_timestamp_ms=decision.source_timestamp_ms,
-                        captured_at_ms=time.time_ns() // 1_000_000,
+                        captured_at_ms=(
+                            time.time_ns() // 1_000_000
+                        ),
                         deepstream_tensor=owned_tensor,
                         gpu_array=gpu_array,
                         shape=tuple(gpu_array.shape),
                         on_release=self._record_release,
                     )
+
+                    # Ownership is now transferred to FramePacket.
                     owned_tensor = None
                     gpu_array = None
 
+                    # Enqueue the frame for TensorRT processing.
                     task = FrameTask(packet)
+
                     self._enqueue_with_abort(task)
+
+                    # Ownership is now transferred to the queue.
                     packet = None
 
                     with self._lock:
                         self.stats.frames_sampled += 1
                         self.stats.frames_cloned += 1
+
                         self.stats.max_queue_depth = max(
                             self.stats.max_queue_depth,
                             self.frame_queue.qsize(),
                         )
+
                         logged_count = self.stats.frames_sampled
 
+                    # Logging.
                     if logged_count <= self.sample_log_limit:
+
                         print(
                             f"[CAMERA] source_frame={frame_number} "
                             f"sample={sample_index} "
                             f"pts_ms={decision.source_timestamp_ms:.2f} "
-                            f"shape={task.packet.shape} gpu={self.gpu_id}",
+                            f"shape={task.packet.shape} "
+                            f"gpu={self.gpu_id}",
                             flush=True,
                         )
+
                     elif logged_count % 25 == 0:
+
                         print(
                             f"[CAMERA] sampled={logged_count} "
                             f"decoded={self.stats.frames_seen}",
@@ -309,23 +381,44 @@ class DeepStreamFrameRetrieverCore:
                         )
 
                 finally:
+                    # Release temporary resources safely.
                     if raw_tensor is not None:
                         del raw_tensor
+
                     if owned_tensor is not None:
                         del owned_tensor
+
                     if gpu_array is not None:
                         del gpu_array
-                    if packet is not None and not packet.released:
+
+                    if (
+                        packet is not None
+                        and not packet.released
+                    ):
                         packet.release()
+
+            # Validate that the batch contained frame metadata.
+            if frame_count == 0:
+                raise RuntimeError(
+                    "DeepStream buffer contains no frame metadata"
+                )
 
             return 1
 
         except Exception as exc:
+
             with self._lock:
                 self.stats.errors += 1
+
             self.fatal_event.set()
-            print(f"[CAMERA ERROR] {type(exc).__name__}: {exc}", flush=True)
+
+            print(
+                f"[CAMERA ERROR] {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
             traceback.print_exc()
+
             return -1
 
     def summary(self) -> dict[str, int]:
