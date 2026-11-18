@@ -35,7 +35,9 @@ services:
     command: ["bash"]
 
   object-store:
-    image: quay.io/minio/minio:RELEASE.2025-09-06T17-38-46Z
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.minio
     command: server /data --console-address ":9001"
     restart: unless-stopped
     environment:
@@ -47,7 +49,7 @@ services:
     volumes:
       - camera_objects:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
       interval: 5s
       timeout: 5s
       retries: 30

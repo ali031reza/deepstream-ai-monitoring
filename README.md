@@ -31,9 +31,11 @@ Run the commands from the project root. The application uses the existing Postgr
 
 ```bash
 grep -q '^OBJECT_STORE_PASSWORD=.' .env || printf '\nOBJECT_STORE_PASSWORD=%s\n' "$(openssl rand -hex 32)" >> .env
-docker compose build dev
+docker compose build dev object-store
 docker compose up -d --wait kafka object-store
 ```
+
+If the DeepStream image is already built, run `docker compose build object-store` followed by `docker compose up -d --wait kafka object-store`. The first object-store build compiles the pinned upstream MinIO release and requires access to Docker Hub, GitHub and Go module dependencies.
 
 Apply the additive migration using the database owner. These commands assume the existing container name, database and application role from the Paris setup. The migration is safe to run more than once and keeps earlier inference rows and files.
 
