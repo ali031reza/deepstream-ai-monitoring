@@ -16,19 +16,24 @@ Kafka is batched on both sides.
 
 ```mermaid
 flowchart LR
-    clip["Local video"] --> ds["DeepStream decode"]
-    ds --> sample["PTS sample"]
-    sample -->|"bounded queue"| trt["TensorRT FP16 worker<br/>execute_async_v3"]
-    trt --> decide{"Person ≥ 0.65?"}
-    decide -->|yes| minio["MinIO JPEGs"]
-    decide --> pubQ["Publisher queue"]
-    minio --> pubQ
-    pubQ -->|"batches of ≤32 / 100 ms"| kafka["Kafka topic"]
-    kafka --> poll["Consumer poll thread"]
-    poll -->|"writer queue"| writer["AsyncBatchWriter<br/>≤100 msgs / 50 ms"]
-    writer -->|events| pg["PostgreSQL camera_events"]
-    writer -->|invalid| dlt["Dead-letter topic"]
-    writer -->|"batch done"| commit["Commit offsets"]
+    clip([Local video]) --> decode[DeepStream]
+    decode --> trt[[TensorRT FP16]]
+    trt --> images[(MinIO)]
+    trt --> publish[Batch publisher]
+    publish --> topic[(Kafka topic)]
+    topic --> writer[Batch writer]
+    writer --> events[(PostgreSQL)]
+    writer --> dead[(Dead letter)]
+
+    classDef io fill:#e8f4fd,stroke:#1565c0,color:#0d47a1
+    classDef gpu fill:#ede7f6,stroke:#5e35b1,color:#311b92
+    classDef bus fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef db fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+
+    class clip io
+    class decode,trt gpu
+    class publish,writer bus
+    class topic,images,events,dead db
 ```
 
 At default settings a sampled frame becomes an event when at least one person has confidence **≥ 0.65**. Multiple people in one frame produce one event, with a box around each qualifying person. Both paths still publish one Kafka result per sample. The end-to-end supervisor starts the results processor and waits for Kafka assignment before starting the video.
