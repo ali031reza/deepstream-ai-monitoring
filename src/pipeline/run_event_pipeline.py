@@ -274,7 +274,13 @@ class EventPipelineApplication:
 
 
 def main(argv=None):
-    EventPipelineApplication(load_settings()).run(argv)
+    settings = load_settings()
+    if sum(model.enabled for model in settings.models.values()) != 2:
+        raise SystemExit(
+            "The event-persistence runner is still a two-model workflow; "
+            "use src.pipeline.single_model_camera_test for this branch's first milestone"
+        )
+    EventPipelineApplication(settings).run(argv)
 
 
 if __name__ == "__main__":

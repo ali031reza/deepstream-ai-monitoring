@@ -197,6 +197,11 @@ def build_parser(settings: AppSettings) -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     settings = load_settings()
+    if sum(model.enabled for model in settings.models.values()) != 2:
+        raise SystemExit(
+            "The PostgreSQL end-to-end runner is still a two-model workflow; "
+            "validate the single-model mock pipeline first"
+        )
     parser = build_parser(settings)
     args = parser.parse_args(argv)
     if args.db_timeout <= 0 or min(args.model_a_workers, args.model_b_workers, args.model_queue_size) < 1:

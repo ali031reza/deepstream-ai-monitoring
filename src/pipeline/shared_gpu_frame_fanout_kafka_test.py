@@ -1441,6 +1441,13 @@ def build_parser():
 
 def main():
 
+    settings = load_settings()
+    if sum(model.enabled for model in settings.models.values()) != 2:
+        raise SystemExit(
+            "This is the legacy two-model fan-out test. Enable both models "
+            "on the multi-model branch, or run src.pipeline.single_model_camera_test."
+        )
+
     args = build_parser().parse_args()
 
     video_path = load_settings().paths.resolve(args.source)

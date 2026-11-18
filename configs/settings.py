@@ -213,8 +213,9 @@ class ConfigurationLoader:
         if set(models_data) != {"model_a", "model_b"}:
             raise ValueError("models must define model_a and model_b")
         models = {name: ModelSettings(**_section(models_data, name)) for name in models_data}
-        if not all(model.enabled for model in models.values()):
-            raise ValueError("The current two-model GPU pipeline requires both models enabled")
+        enabled_models = [model for model in models.values() if model.enabled]
+        if len(enabled_models) != 1:
+            raise ValueError("This branch requires exactly one enabled model in models")
         queue = QueueSettings(**_section(raw, "queues"))
         event_data = _section(raw, "event_frames")
         events = EventSettings(

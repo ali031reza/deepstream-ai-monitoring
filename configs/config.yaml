@@ -28,7 +28,7 @@ models:
     seed: 42
     mock_delay_ms: 30            # reserved for future deterministic mock models
   model_b:
-    enabled: true
+    enabled: false
     model_id: mock_model_b
     workers: 1
     input_size: 320

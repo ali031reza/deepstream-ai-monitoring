@@ -86,3 +86,32 @@ def test_only_supported_queue_policy_is_accepted(tmp_path):
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="Only queues.overflow_policy=block"):
         ConfigurationLoader().load(path)
+
+
+def test_single_model_branch_enables_exactly_one_model(monkeypatch):
+    monkeypatch.delenv("APP_CONFIG_PATH", raising=False)
+    settings = load_settings()
+    enabled = [name for name, model in settings.models.items() if model.enabled]
+    assert enabled == ["model_a"]
+
+
+def test_configuration_rejects_zero_enabled_models(tmp_path):
+    source = ProjectPaths.from_environment().config_file
+    raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    raw["models"]["model_a"]["enabled"] = False
+    raw["models"]["model_b"]["enabled"] = False
+    path = tmp_path / "no-model.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="exactly one enabled model"):
+        ConfigurationLoader().load(path)
+
+
+def test_configuration_rejects_two_enabled_models(tmp_path):
+    source = ProjectPaths.from_environment().config_file
+    raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    raw["models"]["model_a"]["enabled"] = True
+    raw["models"]["model_b"]["enabled"] = True
+    path = tmp_path / "two-models.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="exactly one enabled model"):
+        ConfigurationLoader().load(path)
