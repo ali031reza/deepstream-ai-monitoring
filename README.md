@@ -205,8 +205,10 @@ Expected artifact:
 
 ### 2. Build the matching DeepStream/TensorRT image
 
-DeepStream 9.2 is based on CUDA 13.2 and TensorRT 10.16.0.72. The Dockerfile
-installs the matching TensorRT Python bindings and ONNX parser runtime.
+DeepStream 9.2 is based on CUDA 13.2 and TensorRT 10.16.0.72. The DeepStream base image supplies the native TensorRT runtime, ONNX parser,
+and `trtexec`. The Dockerfile installs the matching TensorRT 10.16.0.72
+Python bindings from NVIDIA's CUDA 13 PyPI package, avoiding an APT update
+against the base image's external CUDA repository.
 
     docker compose build dev
     docker compose run --rm dev nvidia-smi
