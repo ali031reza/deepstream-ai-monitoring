@@ -20,16 +20,17 @@ RUN python3 -m pip install \
     -r /tmp/requirements.txt \
     "tensorrt-cu13==${TENSORRT_PYTHON_VERSION}"
 
-# Fail at image build time rather than discovering missing TensorRT bindings
-# after a video has been decoded.
+# Image builds do not receive GPU device access. Validate the Python
+# package and parser API here; initialize TensorRT Builder only when the
+# container is launched with the NVIDIA GPU at runtime.
 RUN python3 - <<'PY'
 import tensorrt as trt
 
 print("TensorRT Python:", trt.__version__)
 assert trt.__version__ == "10.16.0.72", trt.__version__
-assert trt.Builder(trt.Logger()) is not None
+assert hasattr(trt, "Builder")
 assert hasattr(trt, "OnnxParser")
-print("TensorRT Builder and ONNX parser bindings: OK")
+print("TensorRT Python and ONNX parser bindings: OK")
 PY
 
 RUN ldconfig -p | grep -q 'libnvonnxparser.so.10' \
