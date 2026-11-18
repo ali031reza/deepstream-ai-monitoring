@@ -284,7 +284,10 @@ def main(argv: list[str] | None = None) -> dict:
     # Create all configured result topics and the DLT before the processor
     # subscribes. The producer's own topic check is intentionally idempotent.
     topics_to_ensure = list(dict.fromkeys(kafka_config["topics"].values()))
-    dead_letter_topic = kafka_config.get("dead_letter", {}).get("topic")
+    dead_letter_topic = (
+        os.environ.get("INFERENCE_DEAD_LETTER_TOPIC")
+        or kafka_config.get("dead_letter", {}).get("topic")
+    )
     if dead_letter_topic:
         topics_to_ensure.append(dead_letter_topic)
     topic_status = KafkaTopicManager(
