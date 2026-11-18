@@ -37,11 +37,13 @@ docker compose up -d --wait kafka object-store
 
 If the DeepStream image is already built, run `docker compose build object-store` followed by `docker compose up -d --wait kafka object-store`. The first object-store build compiles the pinned upstream MinIO release and requires access to Docker Hub, GitHub and Go module dependencies.
 
-Apply the additive migration using the database owner. These commands assume the existing container name, database and application role from the Paris setup. The migration is safe to run more than once and keeps earlier inference rows and files.
+Apply the additive migrations using the database owner. These commands assume the existing container name, database and application role from the Paris setup. Each migration is safe to run more than once and keeps earlier inference rows and files.
 
 ```bash
 docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-postgres}" -d ai_monitoring' \
   < infra/postgres/migrations/004_camera_events.sql &&
+docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-postgres}" -d ai_monitoring' \
+  < infra/postgres/migrations/005_event_bucket.sql &&
 docker exec postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-postgres}" -d ai_monitoring -c "GRANT SELECT ON cameras TO ai_app; GRANT SELECT, INSERT ON camera_events TO ai_app;"'
 ```
 
@@ -55,7 +57,7 @@ Run these commands from the project root in WSL. The defaults sample the 1920 ×
 |---|---|
 | Input video | `videos/reliability/paris_city_walk.mp4` |
 | GPU and engine | Docker Compose with NVIDIA GPU access and a compatible `artifacts/models/yolo11n_fp16.engine` |
-| Database | A project `.env` with the application credentials for the external PostgreSQL instance. Apply migration 004 to create the camera registry and event table. |
+| Database | A project `.env` with the application credentials for the external PostgreSQL instance. Apply migrations 004 and 005 for the camera registry, event table and explicit bucket columns. |
 
 ```bash
 docker compose up -d --wait kafka object-store
@@ -81,14 +83,16 @@ Open the [local MinIO console](http://localhost:9001) and sign in as `camera-sto
 | `artifacts/benchmarks/processor_<session>.json` | Drained Kafka consumer and PostgreSQL writer counters |
 | `artifacts/benchmarks/tensorrt_end_to_end_<session>.json` | Final frame counts, stage throughput, verified database rows and unique images |
 
+The `event_bucket` column names the bucket explicitly on both tables. For a full object URI, join `s3://`, the event's bucket, `/` and its `clean_key` or `boxed_key`. The key already includes the camera prefix.
+
 Use the session ID printed by the launcher to match objects, reports and event rows. Each event has two clocks. Python's `time.time_ns()` records the UTC wall-clock observation time at frame retrieval, stored as PostgreSQL `event_at` (`timestamptz`, millisecond precision). `source_video_ms` is the playback position in the source clip. Replaying the clip creates a new session and new observation timestamps.
 
 ```sql
-SELECT camera_id, zone, available_models, current_model, event_storage_root
+SELECT camera_id, zone, available_models, current_model, event_bucket, event_storage_root
 FROM cameras;
 
 SELECT e.event_at, e.source_video_ms, e.camera_id, c.zone, e.model_id,
-       e.event_type, e.clean_key, e.boxed_key
+       e.event_type, e.event_bucket, e.clean_key, e.boxed_key
 FROM camera_events AS e
 JOIN cameras AS c USING (camera_id)
 ORDER BY e.event_at DESC

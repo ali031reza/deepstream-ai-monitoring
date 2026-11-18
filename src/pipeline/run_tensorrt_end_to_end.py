@@ -58,16 +58,16 @@ def _without_option(arguments: list[str], flag: str) -> list[str]:
 def load_camera(database, camera_id):
     with database.transaction() as conn, conn.cursor() as cur:
         try:
-            cur.execute("SELECT zone, available_models, current_model, event_storage_root "
+            cur.execute("SELECT zone, available_models, current_model, event_storage_root, event_bucket "
                         "FROM cameras WHERE camera_id = %s", (camera_id,))
             row = cur.fetchone()
-            cur.execute("SELECT event_at, clean_key, boxed_key FROM camera_events LIMIT 0")
-        except psycopg.errors.UndefinedTable as exc:
-            raise RuntimeError("Apply infra/postgres/migrations/004_camera_events.sql first") from exc
+            cur.execute("SELECT event_at, event_bucket, clean_key, boxed_key FROM camera_events LIMIT 0")
+        except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
+            raise RuntimeError("Apply PostgreSQL migrations 004_camera_events.sql and 005_event_bucket.sql first") from exc
     if not row or row[2] != "person":
         raise ValueError(f"Camera {camera_id!r} must be registered with current_model=person")
     return dict(camera_id=camera_id, zone=row[0], available_models=row[1],
-                current_model=row[2], event_storage_root=row[3])
+                current_model=row[2], event_storage_root=row[3], event_bucket=row[4])
 
 
 def wait_for_session_offsets(bootstrap, group, topic, offsets, timeout, processor):
