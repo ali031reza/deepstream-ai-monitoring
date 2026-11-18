@@ -56,4 +56,9 @@ message InferenceResult {
     repeated StageTiming timings = 22;
 
     string schema_version = 23;
+    string event_storage_root = 24;
+    string boxed_key = 25;
+    uint64 boxed_bytes = 26;
+    string boxed_sha256 = 27;
+    double source_video_ms = 28;
 }

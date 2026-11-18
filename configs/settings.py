@@ -90,7 +90,6 @@ class QueueSettings:
 @dataclass(frozen=True, slots=True)
 class EventSettings:
     enabled: bool
-    root: Path
     jpeg_quality: int
     minimum_confidence: float
     def __post_init__(self) -> None:
@@ -216,7 +215,6 @@ class ConfigurationLoader:
         event_data = _section(raw, "event_frames")
         events = EventSettings(
             enabled=event_data["enabled"],
-            root=self.paths.resolve(event_data["root"]),
             jpeg_quality=event_data["jpeg_quality"],
             minimum_confidence=float(event_data["minimum_confidence"]),
         )

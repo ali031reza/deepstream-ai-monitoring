@@ -69,6 +69,7 @@ class AsyncBatchWriter:
             "batches": 0,
             "messages": 0,
             "persisted": 0,
+            "non_events": 0,
             "dead_lettered": 0,
             "failed_batches": 0,
             "max_batch_size": 0,
@@ -179,6 +180,7 @@ class AsyncBatchWriter:
             r for r in batch
             if r.result is not None and r.error_type is None
         ]
+        events = [r.result for r in valid_records if r.result.is_event]
         invalid_records = [
             r for r in batch
             if r.result is None or r.error_type is not None
@@ -186,14 +188,12 @@ class AsyncBatchWriter:
 
         try:
             db_started = time.perf_counter()
-            if valid_records:
+            if events:
                 self._retry(
-                    lambda: self.persist_batch(
-                        [record.result for record in valid_records]
-                    ),
+                    lambda: self.persist_batch(events),
                     "PostgreSQL batch persistence",
                 )
-            db_elapsed = (time.perf_counter() - db_started) * 1000.0
+            db_elapsed = (time.perf_counter() - db_started) * 1000.0 if events else 0.0
 
             dlt_started = time.perf_counter()
             if invalid_records:
@@ -209,7 +209,7 @@ class AsyncBatchWriter:
             completion = BatchCompletion(
                 records=tuple(batch),
                 success=True,
-                persisted_count=len(valid_records),
+                persisted_count=len(events),
                 dead_letter_count=len(invalid_records),
                 elapsed_ms=elapsed,
             )
@@ -217,7 +217,8 @@ class AsyncBatchWriter:
             with self._stats_lock:
                 self._stats["batches"] += 1
                 self._stats["messages"] += len(batch)
-                self._stats["persisted"] += len(valid_records)
+                self._stats["persisted"] += len(events)
+                self._stats["non_events"] += len(valid_records) - len(events)
                 self._stats["dead_lettered"] += len(invalid_records)
                 self._stats["max_batch_size"] = max(
                     self._stats["max_batch_size"], len(batch)
@@ -228,7 +229,7 @@ class AsyncBatchWriter:
             logger.info(
                 "Batch flushed: size=%d persisted=%d dlt=%d time=%.2fms",
                 len(batch),
-                len(valid_records),
+                len(events),
                 len(invalid_records),
                 elapsed,
             )

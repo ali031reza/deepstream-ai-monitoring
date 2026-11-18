@@ -2,14 +2,13 @@
 
 Run inside the DeepStream 9.2 container. Frames are sampled by source PTS,
 then sent to a TensorRT FP16 engine. Qualifying person frames are atomically
-saved as JPEG + JSON sidecar before their Protobuf result is published.
+uploaded as paired JPEG objects before their Protobuf result is published.
 """
 from __future__ import annotations
 
 from collections import Counter
 import argparse
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
 import json
 import os
 import queue
@@ -39,7 +38,6 @@ from src.results.kafka_config import (
 )
 from src.results.protobuf_result_adapter import build_inference_result
 from src.storage.event_frame_store import EventFrameStore
-from src.storage.event_metadata_store import EventMetadataStore
 
 
 def positive_int(value: str) -> int:
@@ -67,7 +65,7 @@ class TensorRTEventPipelineOptions:
     batch_width: int
     batch_height: int
     engine_path: Path
-    event_root: Path
+    event_root: str
     event_min_confidence: float
     detection_class: str
     event_every_nth_sample: int
@@ -453,7 +451,6 @@ class TensorRTEventWorker:
     frame_queue: queue.Queue
     publisher: AsyncProtobufKafkaPublisher
     frame_store: EventFrameStore
-    metadata_store: EventMetadataStore
     manifest_writer: JsonlManifestWriter
     ready_event: threading.Event
     fatal_event: threading.Event
@@ -552,13 +549,11 @@ class TensorRTEventWorker:
             processed_at_ms = time.time_ns() // 1_000_000
             image = None
             boxed_metadata = None
-            sidecar_path: Path | None = None
             event_storage_ms = 0.0
 
             if is_event:
                 store_started = time.perf_counter()
                 frame_args = dict(
-                    camera_id=self.options.camera_id,
                     source_session_id=self.options.session_id,
                     frame_sequence=packet.frame_sequence,
                     rgb_array=inference.frame_rgb,
@@ -598,6 +593,11 @@ class TensorRTEventWorker:
                 result_data.update({
                     "event_type": self.options.event_type,
                     "storage_key": image.storage_key,
+                    "event_storage_root": self.frame_store.root,
+                    "boxed_key": boxed.storage_key,
+                    "boxed_sha256": boxed.image_sha256,
+                    "boxed_bytes": boxed.image_size_bytes,
+                    "source_video_ms": packet.source_timestamp_ms,
                     "image_format": image.image_format,
                     "image_size_bytes": image.image_size_bytes,
                     "image_sha256": image.image_sha256,
@@ -612,70 +612,6 @@ class TensorRTEventWorker:
                 worker_id="tensorrt-yolo11n-worker-01",
                 processed_at_ms=processed_at_ms,
             )
-
-            if image is not None:
-                detection_type = qualifying[0].class_name
-                event_metadata = {
-                    "schema_version": "1.1",
-                    "boxed_image": boxed_metadata,
-                    "event_id": message.result_id,
-                    "event_type": self.options.event_type,
-                    "detection_type": detection_type,
-                    "detection": {
-                        "type": detection_type,
-                        "count": len(qualifying),
-                        "items": [
-                            item.to_payload() for item in qualifying
-                        ],
-                    },
-                    "camera_id": self.options.camera_id,
-                    "model_id": self.settings.yolo.model_id,
-                    "model_engine": str(self.options.engine_path),
-                    "gpu_id": self.options.gpu_id,
-                    "source_session_id": self.options.session_id,
-                    "frame_id": message.frame_id,
-                    "frame_sequence": packet.frame_sequence,
-                    "sample_index": packet.sample_index,
-                    "timestamp": {
-                        "source_video_timestamp_ms": round(
-                            packet.source_timestamp_ms, 3
-                        ),
-                        "captured_at_ms": packet.captured_at_ms,
-                        "captured_at_utc": datetime.fromtimestamp(
-                            packet.captured_at_ms / 1000.0,
-                            tz=timezone.utc,
-                        ).isoformat(),
-                        "processed_at_ms": processed_at_ms,
-                        "processed_at_utc": datetime.fromtimestamp(
-                            processed_at_ms / 1000.0,
-                            tz=timezone.utc,
-                        ).isoformat(),
-                        "semantics": (
-                            "captured_at is when this process observed the decoded "
-                            "frame; source_video_timestamp is the source PTS."
-                        ),
-                    },
-                    "frame": {
-                        "width": packet.shape[1],
-                        "height": packet.shape[0],
-                        "sample_fps": self.options.sample_fps,
-                    },
-                    "event_min_confidence": self.options.event_min_confidence,
-                    "detections": detections,
-                    "image": {
-                        "storage_key": image.storage_key,
-                        "format": image.image_format,
-                        "size_bytes": image.image_size_bytes,
-                        "sha256": image.image_sha256,
-                    },
-                }
-                sidecar_started = time.perf_counter()
-                sidecar = self.metadata_store.write(
-                    storage_key=image.storage_key,
-                    metadata=event_metadata,
-                )
-                event_storage_ms += (time.perf_counter() - sidecar_started) * 1000
-                sidecar_path = sidecar.metadata_path
 
             manifest_record = {
                 "schema_version": "1.0",
@@ -698,7 +634,6 @@ class TensorRTEventWorker:
                 "event_image": (
                     {
                         "storage_key": image.storage_key,
-                        "metadata_path": str(sidecar_path),
                         "sha256": image.image_sha256,
                         "size_bytes": image.image_size_bytes,
                     }
@@ -711,7 +646,7 @@ class TensorRTEventWorker:
             self.manifest_writer.write(manifest_record)
             self.active_ms["result_manifest"] += (time.perf_counter() - manifest_start) * 1000
 
-            # The JPEG and JSON sidecar are durable before Kafka receives
+            # Both JPEG objects are durable before Kafka receives
             # the Protobuf result that references them.
             self.publisher.publish(message)
 
@@ -730,7 +665,6 @@ class TensorRTEventWorker:
                 "is_event": is_event,
                 "detection_count": len(detections),
                 "event_storage_key": image.storage_key if image else None,
-                "metadata_path": str(sidecar_path) if sidecar_path else None,
             })
 
         except Exception as exc:
@@ -774,7 +708,6 @@ class KafkaEventVerifier:
     camera_id: str
     session_id: str
     frame_store: EventFrameStore
-    metadata_store: EventMetadataStore
 
     def wait_for_assignment(self, timeout_seconds: float = 30.0) -> None:
         self.consumer.subscribe([self.topic])
@@ -815,6 +748,7 @@ class KafkaEventVerifier:
             int(item["frame_sequence"]): item for item in expected
         }
         received: dict[int, InferenceResult] = {}
+        offsets = {}
         deadline = time.monotonic() + timeout_seconds
 
         while len(received) < len(expected_by_sequence):
@@ -859,22 +793,13 @@ class KafkaEventVerifier:
                     image_size_bytes=result.image_size_bytes,
                     image_sha256=result.image_sha256,
                 )
-                sidecar_path = self.metadata_store.verify(result.storage_key)
-                sidecar = self.metadata_store.read(result.storage_key)
-                boxed = sidecar["boxed_image"]
-                if boxed["storage_key"] != self.frame_store.boxed_key(result.storage_key):
-                    raise AssertionError("Boxed JPEG key does not match event frame")
-                self.frame_store.verify(
-                    storage_key=boxed["storage_key"],
-                    image_size_bytes=boxed["size_bytes"],
-                    image_sha256=boxed["sha256"],
-                )
-                if sidecar.get("camera_id") != self.camera_id:
-                    raise AssertionError("Event sidecar camera_id mismatch")
-                if sidecar.get("event_id") != result.result_id:
-                    raise AssertionError("Event sidecar result_id mismatch")
-                if not sidecar_path.is_file():
-                    raise AssertionError("Event metadata sidecar is missing")
+                if result.event_storage_root != self.frame_store.root:
+                    raise AssertionError("Unexpected camera storage root")
+                self.frame_store.verify(storage_key=result.boxed_key,
+                                        image_size_bytes=result.boxed_bytes,
+                                        image_sha256=result.boxed_sha256)
+            partition = message.partition()
+            offsets[partition] = max(offsets.get(partition, 0), message.offset() + 1)
             received[sequence] = result
 
         expected_sequences = set(expected_by_sequence)
@@ -889,6 +814,7 @@ class KafkaEventVerifier:
         return {
             "passed": True,
             "messages_received": len(received),
+            "end_offsets": offsets,
             "event_messages": sum(1 for item in received.values() if item.is_event),
             "topic": self.topic,
             "model_id": self.model_id,
@@ -928,7 +854,6 @@ class TensorRTEventPipelineApplication:
             self.options.event_root,
             quality=self.options.jpeg_quality,
         )
-        metadata_store = EventMetadataStore(frame_store)
         manifest_writer = JsonlManifestWriter(manifest_path)
 
         config_path = self.settings.paths.resolve(
@@ -961,7 +886,6 @@ class TensorRTEventPipelineApplication:
             camera_id=self.options.camera_id,
             session_id=self.options.session_id,
             frame_store=frame_store,
-            metadata_store=metadata_store,
         )
 
         publisher = AsyncProtobufKafkaPublisher(
@@ -1004,7 +928,6 @@ class TensorRTEventPipelineApplication:
             frame_queue=frame_queue,
             publisher=publisher,
             frame_store=frame_store,
-            metadata_store=metadata_store,
             manifest_writer=manifest_writer,
             ready_event=ready_event,
             fatal_event=fatal_event,
@@ -1294,7 +1217,6 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
             "engine", "artifacts/models/yolo11n_fp16.engine"
         ))),
     )
-    parser.add_argument("--event-root", default=str(settings.events.root))
     parser.add_argument(
         "--event-min-confidence", type=float,
         default=settings.events.minimum_confidence,
@@ -1333,7 +1255,7 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
     return parser
 
 
-def main(argv: list[str] | None = None) -> dict[str, Any]:
+def main(argv: list[str] | None = None, *, event_root: str) -> dict[str, Any]:
     settings = load_settings()
     raw = _load_tensorrt_config(settings)
     parser = build_parser(settings, raw)
@@ -1349,7 +1271,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         batch_width=args.batch_width,
         batch_height=args.batch_height,
         engine_path=settings.paths.resolve(args.engine),
-        event_root=settings.paths.resolve(args.event_root),
+        event_root=event_root,
         event_min_confidence=args.event_min_confidence,
         detection_class=args.detection_class,
         event_every_nth_sample=args.event_every_nth_sample,

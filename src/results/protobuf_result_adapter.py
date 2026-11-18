@@ -122,7 +122,7 @@ def build_inference_result(
             model_input_size, "model_input_size"
         )
 
-    result.schema_version = "1.0"
+    result.schema_version = "2.0"
 
     # Stable ID for retries of the same model/frame result.
     idempotency_key = (
@@ -168,6 +168,12 @@ def build_inference_result(
         result.image_sha256 = model_output.get(
             "image_sha256", ""
         )
+
+        result.event_storage_root = model_output["event_storage_root"]
+        result.boxed_key = model_output["boxed_key"]
+        result.boxed_sha256 = model_output["boxed_sha256"]
+        result.boxed_bytes = model_output["boxed_bytes"]
+        result.source_video_ms = model_output["source_video_ms"]
 
     # Convert detections.
     detections = model_output.get("detections", [])

@@ -1,7 +1,7 @@
 """Run the complete DeepStream -> TensorRT -> Kafka -> PostgreSQL path.
 
 The producer remains responsible for decode, frame sampling, TensorRT inference,
-event JPEG/JSON persistence and Protobuf publication. This supervisor starts the
+paired JPEG objects persistence and Protobuf publication. This supervisor starts the
 existing results processor first, waits until its Kafka group is assigned, runs
 the producer, verifies the exact session in PostgreSQL, then shuts the processor
 down gracefully.
@@ -55,32 +55,40 @@ def _without_option(arguments: list[str], flag: str) -> list[str]:
     return result
 
 
-def _validate_database_schema(database: DatabaseClient) -> None:
-    """Fail before decoding video if the required Phase-1/DeepStream schema is absent."""
+def load_camera(database, camera_id):
+    with database.transaction() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("SELECT zone, available_models, current_model, event_storage_root "
+                        "FROM cameras WHERE camera_id = %s", (camera_id,))
+            row = cur.fetchone()
+            cur.execute("SELECT event_at, clean_key, boxed_key FROM camera_events LIMIT 0")
+        except psycopg.errors.UndefinedTable as exc:
+            raise RuntimeError("Apply infra/postgres/migrations/004_camera_events.sql first") from exc
+    if not row or row[2] != "person":
+        raise ValueError(f"Camera {camera_id!r} must be registered with current_model=person")
+    return dict(camera_id=camera_id, zone=row[0], available_models=row[1],
+                current_model=row[2], event_storage_root=row[3])
+
+
+def wait_for_session_offsets(bootstrap, group, topic, offsets, timeout, processor):
+    """Fence shutdown on all session messages, including trailing non-events."""
+    from confluent_kafka import Consumer, TopicPartition
+    observer = Consumer({"bootstrap.servers": bootstrap, "group.id": group,
+                         "enable.auto.commit": False})
+    targets = {int(partition): offset for partition, offset in offsets.items()}
+    partitions = [TopicPartition(topic, partition) for partition in targets]
+    deadline = time.monotonic() + timeout
     try:
-        with database.transaction() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute("""
-                    SELECT camera_id, frame_id, model_id, processed_at_ms, status,
-                           is_event, event_type, event_image_id, source_session_id,
-                           result_id, worker_id, frame_sequence, gpu_id, frame_width,
-                           frame_height, model_input_size, captured_at_ms,
-                           schema_version, payload_sha256, detections, timings
-                    FROM inference_results
-                    LIMIT 0
-                """)
-                cursor.execute("""
-                    SELECT id, camera_id, frame_id, storage_key, image_format,
-                           file_size_bytes, sha256, captured_at_ms
-                    FROM event_images
-                    LIMIT 0
-                """)
-    except Exception as exc:
-        raise RuntimeError(
-            "PostgreSQL is reachable, but its schema is not ready for DeepStream "
-            "results. Apply the existing base schema and "
-            "infra/postgres/migrations/003_deepstream_result_metadata.sql."
-        ) from exc
+        while time.monotonic() < deadline:
+            if processor.poll() is not None:
+                raise RuntimeError("Results processor exited before consuming the session")
+            committed = observer.committed(partitions, timeout=5.0)
+            if len(committed) == len(targets) and all(part.offset >= targets[part.partition] for part in committed):
+                return
+            time.sleep(0.25)
+        raise TimeoutError(f"Results processor did not commit session offsets {targets}")
+    finally:
+        observer.close()
 
 
 def wait_for_consumer_group(
@@ -153,7 +161,7 @@ def wait_for_database_session(
             )
 
         try:
-            report = verify_session(database, store, session_id)
+            report = verify_session(database, store, session_id, expected_events)
             last_report = report
             last_database_error = None
         except (psycopg.OperationalError, psycopg.InterfaceError) as exc:
@@ -314,7 +322,9 @@ def main(argv: list[str] | None = None) -> dict:
                 "it is also the password for this application role."
             ) from exc
         raise
-    _validate_database_schema(database)
+    camera_id = _option_value(producer_args, "--camera-id",
+                              _option_value(producer_args, "--source-id", settings.source.camera_id))
+    camera = load_camera(database, camera_id)
 
     environment = os.environ.copy()
     environment["APP_CONFIG_PATH"] = str(config_path)
@@ -366,15 +376,15 @@ def main(argv: list[str] | None = None) -> dict:
         producer_args.extend(["--session-id", session_id])
         from src.pipeline.run_tensorrt_event_pipeline import main as run_producer
 
-        producer_report = run_producer(producer_args)
-        expected_rows = int(producer_report.get("frames_sampled", 0))
+        producer_report = run_producer(producer_args, event_root=camera["event_storage_root"])
+        sampled = int(producer_report["frames_sampled"])
         expected_events = int(producer_report.get("event_frames_saved", 0))
         store_stats = producer_report.get("event_image_store_stats", {})
         expected_images = int(store_stats.get("saved", 0)) + int(
             store_stats.get("reused", 0)
         )
 
-        if expected_rows <= 0:
+        if sampled <= 0:
             raise RuntimeError("TensorRT producer completed without sampled frames")
         if expected_images != expected_events:
             raise AssertionError(
@@ -382,13 +392,15 @@ def main(argv: list[str] | None = None) -> dict:
                 f"stored/reused images={expected_images}"
             )
 
+        wait_for_session_offsets(kafka_bootstrap, group_id, configured_topic,
+                                 producer_report["kafka_verification"]["end_offsets"], db_timeout, processor)
         store = EventFrameStore(producer_report["event_image_store"])
         database_report = wait_for_database_session(
             database=database,
             store=store,
             session_id=session_id,
             model_id=settings.yolo.model_id,
-            expected_rows=expected_rows,
+            expected_rows=expected_events,
             expected_events=expected_events,
             expected_images=expected_images,
             timeout_seconds=db_timeout,
@@ -405,10 +417,10 @@ def main(argv: list[str] | None = None) -> dict:
         rates = dict(producer_report["throughput"])
         rates["consumer_validation"] = rate(consumer["received"], consumer["prepare_seconds"], "messages", "processor deserialize and validate")
         rates["postgres_write"] = rate(writer["persisted"], writer["db_time_ms"] / 1000, "rows", "processor batch persistence including retries")
-        rates["end_to_end"] = rate(expected_rows, session_seconds, "verified samples", "processor launch through clean shutdown")
+        rates["end_to_end"] = rate(sampled, session_seconds, "verified samples", "processor launch through clean shutdown")
         frame_counts = {
             "decoded": producer_report["frames_decoded"],
-            "sampled": expected_rows,
+            "sampled": sampled,
             "skipped": producer_report["frames_skipped"],
             "qualifying": producer_report["qualifying_frames"],
             "event_frames": expected_events,
@@ -430,7 +442,9 @@ def main(argv: list[str] | None = None) -> dict:
             "kafka_topic_status": topic_status,
             "results_consumer_group": group_id,
             "results_consumer_group_ready": group_ready,
-            "expected_results": expected_rows,
+            "expected_results": sampled,
+            "expected_postgres_rows": expected_events,
+            "camera": camera,
             "expected_event_results": expected_events,
             "expected_unique_event_images": expected_images,
             "postgresql": database_report,
@@ -453,7 +467,7 @@ def main(argv: list[str] | None = None) -> dict:
         print(f"Session report: {report_path}")
         print("=" * 78)
         print(
-            "PASS: DeepStream -> YOLO11n TensorRT -> event JPEG/JSON -> "
+            "PASS: DeepStream -> YOLO11n TensorRT -> paired JPEG objects -> "
             "Kafka -> PostgreSQL"
         )
         return final_report

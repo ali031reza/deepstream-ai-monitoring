@@ -8,7 +8,6 @@ queues:
   overflow_policy: block
 event_frames:
   enabled: true
-  root: artifacts/event_frames
   jpeg_quality: 88
   minimum_confidence: 0.65
 kafka:

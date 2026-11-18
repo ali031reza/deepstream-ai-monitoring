@@ -95,6 +95,14 @@ def validate_inference_result(
         errors.append("image_size_bytes cannot be negative")
 
     if message.is_event:
+        if not message.event_storage_root.startswith("s3://"):
+            errors.append("Event requires an S3 storage root")
+        if message.boxed_key != message.storage_key.removesuffix(".jpg") + ".boxed.jpg":
+            errors.append("Event requires a matching boxed JPEG key")
+        if message.boxed_bytes <= 0 or not SHA256_PATTERN.fullmatch(message.boxed_sha256):
+            errors.append("Event requires boxed JPEG size and SHA-256")
+        if not isfinite(message.source_video_ms) or message.source_video_ms < 0:
+            errors.append("Event requires a nonnegative video timestamp")
         key = message.storage_key
         if (
             not key

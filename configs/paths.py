@@ -34,10 +34,6 @@ class ProjectPaths:
         return self.root / ".env"
 
     @property
-    def event_frames(self) -> Path:
-        return self.root / "artifacts" / "event_frames"
-
-    @property
     def benchmarks(self) -> Path:
         return self.root / "artifacts" / "benchmarks"
 

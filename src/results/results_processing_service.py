@@ -152,7 +152,7 @@ class ResultsProcessingService:
                 ) * 1000.0
 
             self._metrics["batches"] += 1
-            self._metrics["processed"] += completion.persisted_count
+            self._metrics["processed"] += len(completion.records) - completion.dead_letter_count
             self._metrics["dead_lettered"] += completion.dead_letter_count
 
             logger.info(

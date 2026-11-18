@@ -24,6 +24,8 @@ services:
       - .:/workspace
 
     depends_on:
+      object-store:
+        condition: service_healthy
       kafka:
         condition: service_healthy
 
@@ -31,6 +33,24 @@ services:
     tty: true
 
     command: ["bash"]
+
+  object-store:
+    image: quay.io/minio/minio:RELEASE.2025-09-06T17-38-46Z
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: camera-store
+      MINIO_ROOT_PASSWORD: ${OBJECT_STORE_PASSWORD:?Set OBJECT_STORE_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - camera_objects:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   kafka:
     image: apache/kafka:4.4.0
@@ -90,4 +110,5 @@ services:
       start_period: 20s
 
 volumes:
+  camera_objects:
   kafka_data:
