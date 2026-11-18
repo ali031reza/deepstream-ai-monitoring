@@ -1143,7 +1143,10 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
         default=settings.events.jpeg_quality,
     )
     parser.add_argument("--session-id", default=None)
-    parser.add_argument("--max-samples", type=positive_int, default=None)
+    parser.add_argument(
+        "--max-samples", type=positive_int, default=None,
+        help="Cap inference to the first N sampled frames; DeepStream still decodes to EOS",
+    )
     parser.add_argument("--no-kafka-verify", action="store_true")
     return parser
 

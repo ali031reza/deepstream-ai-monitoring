@@ -226,8 +226,9 @@ Expected artifact:
 
     docker compose up -d kafka
 
-Run a short smoke test first (120 sampled frames, about 15 seconds of source
-video at 8 FPS):
+Run a smoke test with inference capped at 120 sampled frames. For a genuinely
+short run, use a source clip of about 15 seconds; the cap limits inference,
+but DeepStream still decodes the source through end-of-stream:
 
     docker compose run --rm dev \
       python3 -m src.pipeline.run_tensorrt_event_pipeline \
