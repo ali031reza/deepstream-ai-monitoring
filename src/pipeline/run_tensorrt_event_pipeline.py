@@ -769,7 +769,8 @@ class TensorRTEventPipelineApplication:
     options: TensorRTEventPipelineOptions
 
     def run(self) -> dict[str, Any]:
-        from pyservicemaker import BufferRetriever, Flow, Pipeline
+        from pyservicemaker import BufferRetriever, Flow, Pipeline, Probe
+        from src.pipeline.frame_metadata_probe import FrameMetadataProbe
         import cupy as cp
 
         if not self.options.source.is_file():
@@ -862,6 +863,8 @@ class TensorRTEventPipelineApplication:
                 return self.core.consume(buffer)
 
         retriever = ServiceMakerRetriever(retriever_core)
+        metadata_probe = FrameMetadataProbe()
+        metadata_probe_handle = Probe("frame-metadata", metadata_probe)
         worker = TensorRTEventWorker(
             settings=self.settings,
             options=self.options,
@@ -941,6 +944,7 @@ class TensorRTEventPipelineApplication:
                     width=self.options.batch_width,
                     height=self.options.batch_height,
                 )
+                .attach(metadata_probe_handle)
                 .retrieve(retriever)
             )
             started = time.perf_counter()
@@ -994,6 +998,7 @@ class TensorRTEventPipelineApplication:
 
         elapsed_seconds = time.perf_counter() - started
         retriever_summary = retriever_core.summary()
+        metadata_probe_summary = metadata_probe.get_summary()
         event_frames = sum(1 for item in worker.results if item["is_event"])
         detections_total = sum(
             int(item["detection_count"]) for item in worker.results
@@ -1013,6 +1018,7 @@ class TensorRTEventPipelineApplication:
             "sample_interval_ms": 1000.0 / self.options.sample_fps,
             "fallback_source_fps": self.options.fallback_source_fps,
             "frames_decoded": retriever_summary["frames_seen"],
+            "metadata_probe": metadata_probe_summary,
             "frames_sampled": retriever_summary["frames_sampled"],
             "frames_skipped": retriever_summary["frames_skipped"],
             "frames_released": retriever_summary["frames_released"],
@@ -1056,6 +1062,7 @@ class TensorRTEventPipelineApplication:
             not worker.startup_errors,
             not worker.worker_errors,
             retriever_summary["errors"] == 0,
+            metadata_probe_summary["total_frames"] == retriever_summary["frames_seen"],
             retriever_summary["frames_sampled"] > 0,
             retriever_summary["frames_sampled"] == len(worker.results),
             retriever_summary["frames_cloned"] == retriever_summary["frames_released"],
@@ -1179,7 +1186,7 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> dict[str, Any]:
     settings = load_settings()
     raw = _load_tensorrt_config(settings)
     parser = build_parser(settings, raw)
@@ -1208,7 +1215,7 @@ def main(argv: list[str] | None = None) -> None:
         max_samples=args.max_samples,
         verify_kafka=not args.no_kafka_verify,
     )
-    TensorRTEventPipelineApplication(settings, options).run()
+    return TensorRTEventPipelineApplication(settings, options).run()
 
 
 if __name__ == "__main__":
