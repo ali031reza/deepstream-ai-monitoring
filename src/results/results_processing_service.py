@@ -44,6 +44,8 @@ class ResultsProcessingService:
         self.shutdown_timeout_seconds = shutdown_timeout_seconds
 
         self._metrics = {
+            "prepare_seconds": 0.0,
+            "received": 0,
             "submitted": 0,
             "processed": 0,
             "dead_lettered": 0,
@@ -227,7 +229,10 @@ class ResultsProcessingService:
                 if message is None:
                     continue
 
+                prepare_start = time.perf_counter()
                 record = self._prepare_record(message)
+                self._metrics["prepare_seconds"] += time.perf_counter() - prepare_start
+                self._metrics["received"] += 1
                 if self.batch_writer.submit(record):
                     submitted += 1
                     self._metrics["submitted"] += 1
@@ -298,3 +303,5 @@ class ResultsProcessingService:
 
         if failure is not None:
             raise failure
+
+        return dict(self._metrics)

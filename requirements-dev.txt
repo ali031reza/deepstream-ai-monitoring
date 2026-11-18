@@ -1,4 +1,0 @@
--r requirements.txt
-numpy>=1.26,<3
-pytest>=8.0,<10
-ruff>=0.8,<1

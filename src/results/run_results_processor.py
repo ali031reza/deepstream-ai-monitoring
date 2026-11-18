@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+import json
 import logging
 import signal
 import threading
@@ -21,6 +22,7 @@ from src.results.results_processing_service import ResultsProcessingService
 class ResultsProcessorApplication:
     config_path: str | Path | None = None
     max_messages: int | None = None
+    stats_path: Path | None = None
     stop_event: threading.Event = field(default_factory=threading.Event, init=False)
 
     def request_shutdown(self, signum: int, _frame: object) -> None:
@@ -64,17 +66,20 @@ class ResultsProcessorApplication:
             shutdown_timeout_seconds=batch["shutdown_timeout_seconds"],
         )
         logging.info("Starting processor topics=%s batch_size=%d", list(config.topic_model_map), batch["batch_size"])
-        service.run(stop_event=self.stop_event, max_messages=self.max_messages)
+        stats = service.run(stop_event=self.stop_event, max_messages=self.max_messages)
+        if self.stats_path is not None:
+            self.stats_path.write_text(json.dumps({"consumer": stats, "writer": writer.stats()}), encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="DeepStream Kafka Results Processor")
     parser.add_argument("--config", default=None, help="YAML config path, relative to the project root")
     parser.add_argument("--max-messages", type=int, default=None)
+    parser.add_argument("--stats-path", type=Path)
     args = parser.parse_args(argv)
     if args.max_messages is not None and args.max_messages <= 0:
         parser.error("--max-messages must be positive")
-    ResultsProcessorApplication(args.config, args.max_messages).run()
+    ResultsProcessorApplication(args.config, args.max_messages, args.stats_path).run()
 
 
 if __name__ == "__main__":

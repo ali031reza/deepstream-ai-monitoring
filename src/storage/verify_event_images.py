@@ -1,8 +1,5 @@
 """Read-only PostgreSQL metadata ↔ persistent JPEG integrity verification."""
 from __future__ import annotations
-from configs.settings import load_settings
-import argparse
-import json
 
 from src.storage.event_frame_store import EventFrameStore
 
@@ -42,24 +39,3 @@ def verify_session(database, store: EventFrameStore, session_id: str):
         "source_session_id": session_id,
         "models": models, "verified_unique_images": len(image_rows),
     }
-
-
-def main():
-    settings = load_settings()
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--session-id", required=True)
-    parser.add_argument("--event-root", default=str(settings.events.root))
-    parser.add_argument("--kafka-config", default=str(settings.paths.config_file))
-    args = parser.parse_args()
-    from src.kafka.runtime_config import load_runtime_config
-    from src.database.client import DatabaseClient
-    database = DatabaseClient(**load_runtime_config(args.kafka_config)["database"])
-    result = verify_session(database, EventFrameStore(args.event_root), args.session_id)
-    print(json.dumps(result, indent=2, sort_keys=True))
-    if not result["models"]:
-        raise SystemExit("No rows found for this source session")
-    print("PASS: PostgreSQL event JPEG references verified")
-
-
-if __name__ == "__main__":
-    main()

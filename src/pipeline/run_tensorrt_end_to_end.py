@@ -23,6 +23,7 @@ import psycopg
 
 from configs.settings import load_settings
 from src.database.client import DatabaseClient
+from src.pipeline.throughput import rate
 from src.kafka.topic_manager import KafkaTopicManager
 from src.results.kafka_config import load_kafka_config, topic_for_model
 from src.storage.event_frame_store import EventFrameStore
@@ -278,7 +279,7 @@ def main(argv: list[str] | None = None) -> dict:
     db_timeout = (
         args.db_timeout
         if args.db_timeout is not None
-        else settings.benchmark.database_timeout_seconds
+        else settings.database_timeout_seconds
     )
 
     # Create all configured result topics and the DLT before the processor
@@ -323,12 +324,18 @@ def main(argv: list[str] | None = None) -> dict:
     # replaying unrelated historical result messages before this producer runs.
     environment["KAFKA_AUTO_OFFSET_RESET"] = "latest"
 
+    metrics_root = settings.paths.resolve(
+        args.metrics_dir or settings.metrics_directory
+    )
+    metrics_root.mkdir(parents=True, exist_ok=True)
+    processor_stats_path = metrics_root / f"processor_{session_id}.json"
     processor_command = [
         sys.executable,
         "-m",
         "src.results.run_results_processor",
         "--config",
         str(config_path),
+        "--stats-path", str(processor_stats_path),
     ]
 
     processor: subprocess.Popen | None = None
@@ -340,6 +347,7 @@ def main(argv: list[str] | None = None) -> dict:
             f"topic={configured_topic} consumer_group={group_id}",
             flush=True,
         )
+        session_started = time.perf_counter()
         processor = subprocess.Popen(
             processor_command,
             env=environment,
@@ -387,12 +395,31 @@ def main(argv: list[str] | None = None) -> dict:
             processor=processor,
         )
 
-        metrics_root = settings.paths.resolve(
-            args.metrics_dir or settings.metrics_directory
-        )
-        metrics_root.mkdir(parents=True, exist_ok=True)
         report_path = metrics_root / f"tensorrt_end_to_end_{session_id}.json"
+        exit_code = stop_results_processor(processor)
+        if exit_code != 0:
+            raise RuntimeError(f"Results processor exit code {exit_code}")
+        session_seconds = time.perf_counter() - session_started
+        processor_stats = json.loads(processor_stats_path.read_text(encoding="utf-8"))
+        consumer, writer = processor_stats["consumer"], processor_stats["writer"]
+        rates = dict(producer_report["throughput"])
+        rates["consumer_validation"] = rate(consumer["received"], consumer["prepare_seconds"], "messages", "processor deserialize and validate")
+        rates["postgres_write"] = rate(writer["persisted"], writer["db_time_ms"] / 1000, "rows", "processor batch persistence including retries")
+        rates["end_to_end"] = rate(expected_rows, session_seconds, "verified samples", "processor launch through clean shutdown")
+        frame_counts = {
+            "decoded": producer_report["frames_decoded"],
+            "sampled": expected_rows,
+            "skipped": producer_report["frames_skipped"],
+            "qualifying": producer_report["qualifying_frames"],
+            "event_frames": expected_events,
+            "images_written": store_stats["saved"],
+            "images_reused": store_stats["reused"],
+            "verified_images": database_report["verified_unique_images"],
+        }
         final_report = {
+            "frame_counts": frame_counts,
+            "throughput": rates,
+            "processor": processor_stats,
             "schema_version": "1.0",
             "source_session_id": session_id,
             "model_id": settings.yolo.model_id,
@@ -416,7 +443,12 @@ def main(argv: list[str] | None = None) -> dict:
         print("\n" + "=" * 78)
         print("COMPLETE TENSORRT END-TO-END PIPELINE REPORT")
         print("=" * 78)
-        print(json.dumps(final_report, indent=2, ensure_ascii=False))
+        print(f"Frames: {frame_counts}")
+        for stage, measurement in rates.items():
+            value = measurement["per_second"]
+            display = f"{value:.2f}" if value is not None else "n/a"
+            print(f"{stage:22} {display:>10} {measurement['unit']}/s")
+        print(f"Session report: {report_path}")
         print("=" * 78)
         print(
             "PASS: DeepStream -> YOLO11n TensorRT -> event JPEG/JSON -> "

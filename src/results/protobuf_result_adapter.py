@@ -1,5 +1,5 @@
 
-"""Convert mock GPU inference output into the backend Protobuf contract."""
+"""Convert TensorRT inference output into the backend Protobuf contract."""
 
 from collections.abc import Mapping
 from numbers import Integral, Real

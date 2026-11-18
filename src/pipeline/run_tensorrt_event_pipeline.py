@@ -6,6 +6,7 @@ saved as JPEG + JSON sidecar before their Protobuf result is published.
 """
 from __future__ import annotations
 
+from collections import Counter
 import argparse
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +27,7 @@ from configs.settings import AppSettings, load_settings
 from src.kafka.message_validator import validate_inference_result
 from src.kafka.topic_manager import KafkaTopicManager
 from src.models.tensorrt_yolo11n_engine import TensorRTYOLO11nEngine
+from src.pipeline.throughput import rate
 from src.pipeline.frame_sampler import FrameSampler
 from src.proto.inference_result_pb2 import InferenceResult
 from src.results.async_protobuf_kafka_publisher import AsyncProtobufKafkaPublisher
@@ -76,9 +78,11 @@ class TensorRTEventPipelineOptions:
     jpeg_quality: int
     session_id: str
     max_samples: int | None = None
-    verify_kafka: bool = True
+    verification_timeout: float = 90.0
 
     def __post_init__(self) -> None:
+        if not self.verification_timeout > 0:
+            raise ValueError("verification timeout must be positive")
         if not self.camera_id.strip() or len(self.camera_id) > 50:
             raise ValueError("camera_id must contain 1-50 characters")
         if self.gpu_id < 0 or self.queue_size < 1:
@@ -457,6 +461,8 @@ class TensorRTEventWorker:
     startup_errors: list[str] = field(default_factory=list)
     worker_errors: list[str] = field(default_factory=list)
     detector: TensorRTYOLO11nEngine | None = field(default=None, init=False)
+    active_ms: Counter = field(default_factory=Counter)
+    qualifying_frames: int = 0
     model_load_ms: float = field(default=0.0, init=False)
 
     def run(self) -> None:
@@ -651,10 +657,12 @@ class TensorRTEventWorker:
                         "sha256": image.image_sha256,
                     },
                 }
+                sidecar_started = time.perf_counter()
                 sidecar = self.metadata_store.write(
                     storage_key=image.storage_key,
                     metadata=event_metadata,
                 )
+                event_storage_ms += (time.perf_counter() - sidecar_started) * 1000
                 sidecar_path = sidecar.metadata_path
 
             manifest_record = {
@@ -685,12 +693,23 @@ class TensorRTEventWorker:
                 ),
                 "result_id": message.result_id,
             }
+            manifest_record["qualifying_detections"] = len(qualifying)
+            manifest_start = time.perf_counter()
             self.manifest_writer.write(manifest_record)
+            self.active_ms["result_manifest"] += (time.perf_counter() - manifest_start) * 1000
 
             # The JPEG and JSON sidecar are durable before Kafka receives
             # the Protobuf result that references them.
             self.publisher.publish(message)
 
+            self.qualifying_frames += int(bool(qualifying))
+            self.active_ms.update({
+                "preprocess": inference.preprocess_ms,
+                "host_to_device": inference.host_to_device_ms,
+                "tensorrt": inference.inference_ms,
+                "postprocess": inference.postprocess_ms,
+                "event_storage": event_storage_ms,
+            })
             self.results.append({
                 "frame_sequence": packet.frame_sequence,
                 "sample_index": packet.sample_index,
@@ -981,6 +1000,7 @@ class TensorRTEventPipelineApplication:
         kafka_verification: dict[str, Any] = {
             "passed": False, "messages_received": 0
         }
+        flow_seconds = delivery_seconds = verify_seconds = 0.0
         consumer_started = False
         publisher_started = False
         worker_started = False
@@ -1007,9 +1027,8 @@ class TensorRTEventPipelineApplication:
         print("Inference: TensorRT FP16 engine; no PyTorch/Ultralytics/OpenCV in container")
 
         try:
-            if self.options.verify_kafka:
-                verifier.wait_for_assignment()
-                consumer_started = True
+            verifier.wait_for_assignment()
+            consumer_started = True
 
             publisher.start()
             publisher_started = True
@@ -1041,7 +1060,10 @@ class TensorRTEventPipelineApplication:
                 .retrieve(retriever)
             )
             started = time.perf_counter()
-            flow()
+            try:
+                flow()
+            finally:
+                flow_seconds = time.perf_counter() - started
 
             if fatal_event.is_set():
                 raise RuntimeError("A camera retriever or TensorRT worker failed")
@@ -1074,11 +1096,16 @@ class TensorRTEventPipelineApplication:
             else:
                 publisher_stats = publisher.stats()
 
+            delivery_seconds = time.perf_counter() - started
             if consumer_started:
                 try:
                     expected_results = list(worker.results)
                     if expected_results and publisher_error is None:
-                        kafka_verification = verifier.verify(expected_results)
+                        verify_started = time.perf_counter()
+                        try:
+                            kafka_verification = verifier.verify(expected_results, self.options.verification_timeout)
+                        finally:
+                            verify_seconds = time.perf_counter() - verify_started
                     else:
                         kafka_verification["error"] = "No results were available to verify"
                 except Exception as exc:
@@ -1098,7 +1125,21 @@ class TensorRTEventPipelineApplication:
         )
         event_store_stats = frame_store.stats()
 
+        completed = len(worker.results)
+        rates = {
+            "deepstream_decode": rate(retriever_summary["frames_seen"], flow_seconds, "frames", "flow to EOS"),
+            "sampling": rate(retriever_summary["frames_sampled"], flow_seconds, "samples", "flow to EOS"),
+            "kafka_delivery": rate(publisher_stats.get("delivered", 0), delivery_seconds, "messages", "flow start through publisher drain"),
+            "kafka_verification": rate(kafka_verification.get("messages_received", 0), verify_seconds, "messages", "full verification pass including event files") if kafka_verification.get("passed") else None,
+        }
+        for stage in ("preprocess", "host_to_device", "tensorrt", "postprocess", "result_manifest", "event_storage"):
+            count = event_frames if stage == "event_storage" else completed
+            rates[stage] = rate(count, worker.active_ms[stage] / 1000, "events" if stage == "event_storage" else "samples", "summed stage time")
+
         summary = {
+            "throughput": rates,
+            "qualifying_frames": worker.qualifying_frames,
+            "frames_cloned": retriever_summary["frames_cloned"],
             "schema_version": "1.0",
             "model_id": yolo.model_id,
             "engine": str(self.options.engine_path),
@@ -1144,48 +1185,40 @@ class TensorRTEventPipelineApplication:
             ),
             "publisher_error": publisher_error,
         }
-        report_path.write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
 
-        success = all([
-            pipeline_error is None,
-            publisher_error is None,
-            not worker.startup_errors,
-            not worker.worker_errors,
-            retriever_summary["errors"] == 0,
-            metadata_probe_summary["total_frames"] == retriever_summary["frames_seen"],
-            retriever_summary["frames_sampled"] > 0,
-            retriever_summary["frames_sampled"] == len(worker.results),
-            retriever_summary["frames_cloned"] == retriever_summary["frames_released"],
-            publisher_stats.get("enqueued", 0) == len(worker.results),
-            publisher_stats.get("produce_accepted", 0) == len(worker.results),
-            publisher_stats.get("delivered", 0) == len(worker.results),
-            publisher_stats.get("delivery_failures", 0) == 0,
-            publisher_stats.get("publish_failures", 0) == 0,
-            publisher_stats.get("shutdown_pending", 0) == 0,
-            publisher_stats.get("outstanding_after_produce", 0) == 0,
-            publisher_stats.get("queue_depth", 0) == 0,
-            (
-                not self.options.verify_kafka
-                or kafka_verification.get("passed") is True
-            ),
-        ])
+        checks = {
+            "flow_completed": pipeline_error is None,
+            "publisher_closed": publisher_error is None,
+            "worker_initialized": not worker.startup_errors,
+            "worker_completed": not worker.worker_errors,
+            "retrieval_succeeded": retriever_summary["errors"] == 0,
+            "metadata_matches_decode": metadata_probe_summary["total_frames"] == retriever_summary["frames_seen"],
+            "received_samples": retriever_summary["frames_sampled"] > 0,
+            "samples_completed": retriever_summary["frames_sampled"] == completed,
+            "buffers_released": retriever_summary["frames_cloned"] == retriever_summary["frames_released"],
+            "kafka_verified": kafka_verification.get("passed") is True,
+        }
+        for counter in ("enqueued", "produce_accepted", "delivered"):
+            checks[f"kafka_{counter}"] = publisher_stats.get(counter, 0) == completed
+        for counter in ("delivery_failures", "publish_failures", "shutdown_pending", "outstanding_after_produce", "queue_depth"):
+            checks[f"kafka_{counter}_zero"] = publisher_stats.get(counter, 0) == 0
+        failed_checks = [name for name, passed in checks.items() if not passed]
+        summary["failed_acceptance_checks"] = failed_checks
+        report_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
         print("\n" + "=" * 76)
         print("TENSORRT EVENT PIPELINE SUMMARY")
         print("=" * 76)
         print(json.dumps(summary, indent=2, ensure_ascii=False))
         print("=" * 76)
-        if success:
+        if not failed_checks:
             print("DEEPSTREAM + YOLO11N TENSORRT + EVENT STORAGE + KAFKA TEST PASSED")
         else:
             print("DEEPSTREAM + YOLO11N TENSORRT + EVENT STORAGE + KAFKA TEST FAILED")
         print("=" * 76)
 
-        if not success:
-            raise RuntimeError("TensorRT event pipeline acceptance checks failed")
+        if failed_checks:
+            raise RuntimeError(f"Failed producer checks: {failed_checks}. See {report_path}")
         return summary
 
 
@@ -1275,7 +1308,7 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
         "--max-samples", type=positive_int, default=None,
         help="Cap inference to the first N sampled frames; DeepStream still decodes to EOS",
     )
-    parser.add_argument("--no-kafka-verify", action="store_true")
+    parser.add_argument("--verification-timeout", type=float, default=90.0)
     return parser
 
 
@@ -1306,10 +1339,6 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         jpeg_quality=args.jpeg_quality,
         session_id=UUID(args.session_id).hex if args.session_id else uuid4().hex,
         max_samples=args.max_samples,
-        verify_kafka=not args.no_kafka_verify,
+        verification_timeout=args.verification_timeout,
     )
     return TensorRTEventPipelineApplication(settings, options).run()
-
-
-if __name__ == "__main__":
-    main()

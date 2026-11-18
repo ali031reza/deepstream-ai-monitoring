@@ -27,8 +27,7 @@ def main() -> None:
     weights = settings.paths.resolve(args.weights)
     if not weights.is_file():
         raise FileNotFoundError(
-            f"YOLO weights not found: {weights}. Run the existing YOLO11n "
-            "video test once to download yolo11n.pt, or download the weights."
+            f"Place the YOLO11n weights at {weights} or supply --weights."
         )
     if args.image_size <= 0 or args.opset < 13:
         parser.error("--image-size must be positive and --opset must be >= 13")
