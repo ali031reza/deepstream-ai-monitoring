@@ -253,9 +253,9 @@ inference, waits for its Kafka consumer group to become stable, runs the
 DeepStream/TensorRT producer, waits for the exact run's PostgreSQL rows, checks
 all referenced JPEG hashes, and then stops the results processor gracefully.
 
-Ensure PostgreSQL is running and .env contains DATABASE_PASSWORD (or pass
-it to Docker with -e DATABASE_PASSWORD=$DATABASE_PASSWORD). The database
-must have the existing base schema and
+Ensure PostgreSQL is running and .env contains DATABASE_PASSWORD. If the
+password is only exported in your host shell, pass it to Docker with
+-e DATABASE_PASSWORD=$DATABASE_PASSWORD. The database must have the existing base schema and
 infra/postgres/migrations/003_deepstream_result_metadata.sql applied.
 
 Run the entire video:
@@ -266,7 +266,7 @@ Run the entire video:
       --camera-id camera-01 \
       --sample-fps 8
 
-Optional runtime controls:
+Optional runtime controls can be appended to the same command:
 
     --db-timeout 180
     --processor-startup-timeout 60

@@ -206,7 +206,7 @@ def stop_results_processor(processor: subprocess.Popen | None) -> int | None:
     if processor.poll() is None:
         processor.send_signal(signal.SIGINT)
         try:
-            processor.wait(timeout=45)
+            processor.wait(timeout=180)
         except subprocess.TimeoutExpired:
             processor.terminate()
             try:
