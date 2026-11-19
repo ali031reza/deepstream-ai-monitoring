@@ -16,13 +16,14 @@ Kafka is batched on both sides.
 
 ```mermaid
 flowchart LR
-    clip([Local video]) --> decode[DeepStream]
+    revision[(Config revision)] --> decode[DeepStream]
+    clip([Local video]) --> decode
     decode --> trt[[TensorRT FP16]]
     trt --> images[(MinIO)]
     trt --> publish[Batch publisher]
     publish --> topic[(Kafka topic)]
     topic --> writer[Batch writer]
-    writer --> events[(PostgreSQL)]
+    writer --> events[(PostgreSQL events)]
     writer --> dead[(Dead letter)]
 
     classDef io fill:#e8f4fd,stroke:#1565c0,color:#0d47a1
@@ -33,8 +34,10 @@ flowchart LR
     class clip io
     class decode,trt gpu
     class publish,writer bus
-    class topic,images,events,dead db
+    class topic,images,events,revision,dead db
 ```
+
+The session reads one camera configuration revision from PostgreSQL before the first frame is decoded and copies that revision onto every sampled frame before the frame enters the inference queue. Kafka carries `camera_id` and `camera_config_version` with the model, session, frame sequence, timestamps, detections, and event object keys. It does not carry credentials, connection settings, or the rest of the camera registry. PostgreSQL stores the revision on `camera_events` and the immutable snapshot in `camera_config_revisions`. A message encoded before field 29 existed has `camera_config_version = 0`; the consumer stores that event with a NULL revision instead of assigning the current configuration. Editing `infra/postgres/cameras_counfig/camera-01.yaml` does not change a session that has already started. The next session loads the latest applied revision. There is no hot reload and no configuration topic.
 
 At default settings a sampled frame becomes an event when at least one person has confidence **≥ 0.65**. Multiple people in one frame produce one event, with a box around each qualifying person. Both paths still publish one Kafka result per sample. The end-to-end supervisor starts the results processor and waits for Kafka assignment before starting the video.
 
@@ -55,7 +58,8 @@ At default settings a sampled frame becomes an event when at least one person ha
 | `src/database/batch_result_repository.py` | Idempotent `INSERT` of event batches. |
 | `src/storage/` | JPEG upload to MinIO and session image verification. |
 | `schemas/`, `src/proto/` | `InferenceResult` Protobuf contract and generated bindings. |
-| `infra/postgres/migrations/` | Camera registry, `camera_events`, explicit `event_bucket`. |
+| `infra/postgres/migrations/` | Camera registry, `camera_events`, explicit `event_bucket`, immutable configuration revisions. |
+| `infra/postgres/cameras_counfig/` | Desired camera configuration. `camera-01.yaml` is applied into PostgreSQL; it is not read by a running session. |
 | `tools/` | Optional ONNX export and TensorRT engine build on the target GPU. |
 | `artifacts/models/` | `yolo11n.pt`, ONNX, and `yolo11n_fp16.engine`. |
 | `artifacts/results/`, `artifacts/benchmarks/` | Per-session JSONL, producer metrics, processor counters, end-to-end report. |
@@ -80,20 +84,64 @@ docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POS
   < infra/postgres/migrations/004_camera_events.sql &&
 docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring' \
   < infra/postgres/migrations/005_event_bucket.sql &&
-docker exec postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring -c "GRANT SELECT ON cameras TO ai_app; GRANT SELECT, INSERT ON camera_events TO ai_app;"'
+docker exec postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring -c "GRANT SELECT ON cameras TO ai_app; GRANT SELECT, INSERT ON camera_events TO ai_app;"' &&
+docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring' \
+  < infra/postgres/migrations/006_camera_config_revisions.sql
 ```
 
-The registry seeds `camera-01` in zone `A`, with model names `fire` and `person`. The active model is `person`. Fire is a registry label only. The runner reads the camera's storage root from PostgreSQL and creates the bucket on first use. Compose keeps MinIO data in the named `camera_objects` volume.
+Migration 006 seeds revision 1 from each camera's existing zone, models, and storage root. It leaves `region` unset when the camera has no region, and it leaves existing events unversioned. The checked-in migrations do not define `camera_model_assignments`. If that table is already present and has `camera_id`, revision 1 snapshots its rows before the revision becomes immutable.
 
-## Run the Paris walk
+Validate and apply the desired camera file with the application database credentials from `.env`. The file has no credentials. Applying these values again keeps the same revision number. A real change inserts the next revision and updates the camera's current revision in one transaction. Names, connection settings, and credentials already stored for the camera are left as they are.
 
-From the project root in WSL. Defaults sample the 1920 × 1080, 60 FPS Paris clip at 8 FPS.
+```bash
+python -m tools.apply_camera_config infra/postgres/cameras_counfig/camera-01.yaml
+```
+
+The registry seeds `camera-01` in zone `A`, with model names `fire` and `person`. The active model is `person`. Fire is a registry label only. Region is unset. The runner reads the applied revision's storage root from PostgreSQL and creates the bucket on first use. Compose keeps MinIO data in the named `camera_objects` volume.
+
+## Run the first 500 source frames
+
+`--max-samples` limits inference samples and still decodes the input through end of stream. The bounded check uses a 500-frame clip instead. At 60 FPS and 8 FPS sampling, that clip produces roughly 67 sampled results; use the report counters rather than that estimate. Apply `camera-01.yaml` first. The printed `config_version` must match `camera_config_version` on the Kafka results and `camera_events.config_version` for every event from the session.
+
+```bash
+ffmpeg -y -i videos/reliability/paris_city_walk.mp4 -frames:v 500 -an \
+  -c:v libx264 -pix_fmt yuv420p videos/reliability/paris_first_500_frames.mp4
+ffprobe -v error -select_streams v:0 -count_frames \
+  -show_entries stream=nb_read_frames -of csv=p=0 \
+  videos/reliability/paris_first_500_frames.mp4
+python -m tools.apply_camera_config infra/postgres/cameras_counfig/camera-01.yaml
+docker compose up -d --wait kafka object-store
+docker compose run --rm -T dev python3 -u -m src.pipeline.run_tensorrt_end_to_end \
+  --source /workspace/videos/reliability/paris_first_500_frames.mp4 \
+  --camera-id camera-01 --sample-fps 8 --verification-timeout 600
+```
+
+`ffprobe` should print `500`. The clip matches `*.mp4` in `.gitignore` and stays untracked. Kafka results must equal sampled frames. PostgreSQL rows must equal qualifying stored events. Each event has one clean JPEG and one boxed JPEG.
+
+Join an event back to the revision that applied to its frame:
+
+```sql
+SELECT e.event_at, e.camera_id, e.config_version, r.zone, r.region,
+       r.available_models, r.active_models, r.event_storage_root
+FROM camera_events AS e
+JOIN camera_config_revisions AS r
+  ON r.camera_id = e.camera_id
+ AND r.config_version = e.config_version
+ORDER BY e.event_at DESC
+LIMIT 10;
+```
+
+Events with `config_version` NULL were stored before a revision could be proven. They are not backfilled with the current zone.
+
+## Run the full Paris walk
+
+From the project root in WSL. Defaults sample the full 1920 × 1080, 60 FPS Paris clip at 8 FPS. Start this only after reviewing the 500-frame result.
 
 | Prerequisite | What the runner expects |
 |---|---|
 | Input video | `videos/reliability/paris_city_walk.mp4` |
 | GPU and engine | Compose NVIDIA GPU access and a compatible `artifacts/models/yolo11n_fp16.engine` |
-| Database | Project `.env` with application credentials. Migrations 004 and 005 applied. |
+| Database | Project `.env` with application credentials. Migrations 004, 005, and 006 applied, then `camera-01.yaml` applied. |
 
 ```bash
 docker compose up -d --wait kafka object-store
@@ -117,13 +165,17 @@ docker exec -it postgres-postgres-1 sh -c 'exec psql -U "${POSTGRES_USER}" -d ai
 When the prompt is `ai_monitoring=#`:
 
 ```sql
-SELECT camera_id, zone, available_models, current_model, event_bucket, event_storage_root
+SELECT camera_id, zone, region, current_config_version, available_models,
+       current_model, event_bucket, event_storage_root
 FROM cameras;
 
-SELECT e.event_at, e.source_video_ms, e.camera_id, c.zone, e.model_id,
-       e.event_type, e.event_bucket, e.clean_key, e.boxed_key
+SELECT e.event_at, e.source_video_ms, e.camera_id, e.config_version,
+       r.zone, r.region, e.model_id, e.event_type, e.event_bucket,
+       e.clean_key, e.boxed_key
 FROM camera_events AS e
-JOIN cameras AS c USING (camera_id)
+LEFT JOIN camera_config_revisions AS r
+  ON r.camera_id = e.camera_id
+ AND r.config_version = e.config_version
 ORDER BY e.event_at DESC
 LIMIT 10;
 ```
@@ -167,6 +219,33 @@ Open the [local MinIO console](http://localhost:9001). Sign in as `camera-store`
 | `artifacts/benchmarks/tensorrt_end_to_end_<session>.json` | Stage throughput, verified rows and unique images |
 
 The object URI is `s3://` + `event_bucket` + `/` + `clean_key` or `boxed_key`.
+
+## Event JPEG storage
+
+Each qualifying event still stores exactly two full-resolution JPEGs at quality 88 with 4:4:4 subsampling, plus one PostgreSQL row. Pillow in this environment already uses libjpeg-turbo. A second encoder and a switch to 4:2:0 subsampling were set aside: 4:2:0 changes chroma quality, and the bytes of the current encoder are unchanged by the path below.
+
+The baseline copied the 1920×1080 frame twice, encoded the clean JPEG, encoded the boxed JPEG, and uploaded those objects one after the other. On 80 representative event frames, interleaved against the live MinIO bucket and repeated, that pair took about 42 ms. The time split into roughly 5.7 ms of copies, 7.0 ms to encode the clean JPEG, 0.06 ms to draw the boxes, 7.1 ms to encode the boxed JPEG, 0.4 ms to hash both payloads, and about 11 ms for each upload.
+
+`EventFrameStore.put_pair` keeps one frame copy. It encodes the clean JPEG, draws the boxes on that image, encodes the boxed JPEG, then uploads the two objects at the same time through one S3 client and a pool of two threads. The call returns only after both uploads are acknowledged, which is when the Kafka result may be published. A failed upload leaves the successful object in place. The retry uses `IfNoneMatch` and checks the stored SHA-256, so the pair completes without publishing a partial event. Pool queue wait on the benchmark was under 1 ms. The drain time is the overlapping upload window and stays inside the measured pair interval.
+
+Uploading both objects after both buffers exist was as fast as starting the clean upload during the boxed encode, and it was faster than a second S3 client. That is the path the pipeline uses.
+
+Compare the candidates on the same machine and MinIO instance:
+
+```bash
+PYTHONPATH=. python tools/benchmark_event_jpeg_storage.py --frames 80 --warmup 5
+```
+
+Repeat the full Paris walk at 8 FPS:
+
+```bash
+docker compose up -d --wait kafka object-store
+docker compose run --rm -T dev python3 -u -m src.pipeline.run_tensorrt_end_to_end \
+  --source /workspace/videos/reliability/paris_city_walk.mp4 \
+  --camera-id camera-01 --sample-fps 8 --verification-timeout 600
+```
+
+The pair latency mean, p50, p95, and per-stage means are in the producer report under `event_image_store_stats`.
 
 ## See the throughput
 

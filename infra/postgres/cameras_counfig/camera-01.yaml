@@ -1,0 +1,9 @@
+camera_id: camera-01
+zone: A
+region: null
+available_models:
+  - fire
+  - person
+active_models:
+  - person
+event_storage_root: s3://camera-events/events/camera-01

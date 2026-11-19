@@ -61,4 +61,8 @@ message InferenceResult {
     uint64 boxed_bytes = 26;
     string boxed_sha256 = 27;
     double source_video_ms = 28;
+
+    // Revision applied to this frame. 0 means the producer predates this field.
+    // schema_version stays an independent contract version.
+    uint32 camera_config_version = 29;
 }

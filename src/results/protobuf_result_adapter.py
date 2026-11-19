@@ -50,6 +50,7 @@ def build_inference_result(
     frame_sequence: int,
     captured_at_ms: int,
     worker_id: str,
+    camera_config_version: int,
     processed_at_ms: int | None = None,
 ) -> InferenceResult:
 
@@ -67,6 +68,9 @@ def build_inference_result(
     )
     captured_at_ms = _positive_int(
         captured_at_ms, "captured_at_ms"
+    )
+    camera_config_version = _positive_int(
+        camera_config_version, "camera_config_version"
     )
 
     model_id = _required_string(
@@ -123,6 +127,7 @@ def build_inference_result(
         )
 
     result.schema_version = "2.0"
+    result.camera_config_version = camera_config_version
 
     # Stable ID for retries of the same model/frame result.
     idempotency_key = (

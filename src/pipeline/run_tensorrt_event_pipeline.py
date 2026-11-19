@@ -58,6 +58,7 @@ def nonnegative_int(value: str) -> int:
 class TensorRTEventPipelineOptions:
     source: Path
     camera_id: str
+    camera_config_version: int
     gpu_id: int
     sample_fps: float
     fallback_source_fps: float
@@ -83,6 +84,8 @@ class TensorRTEventPipelineOptions:
             raise ValueError("verification timeout must be positive")
         if not self.camera_id.strip() or len(self.camera_id) > 50:
             raise ValueError("camera_id must contain 1-50 characters")
+        if self.camera_config_version < 1:
+            raise ValueError("camera_config_version must be a positive revision")
         if self.gpu_id < 0 or self.queue_size < 1:
             raise ValueError("gpu_id must be nonnegative and queue_size positive")
         if self.batch_width < 1 or self.batch_height < 1:
@@ -141,6 +144,8 @@ class FramePacket:
 @dataclass(slots=True)
 class FrameTask:
     packet: FramePacket
+    camera_id: str
+    camera_config_version: int
     enqueued_ns: int | None = None
     _enqueued: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
 
@@ -175,6 +180,8 @@ class DeepStreamFrameRetrieverCore:
     frame_queue: queue.Queue
     sampler: FrameSampler
     fatal_event: threading.Event
+    camera_id: str
+    camera_config_version: int
     max_samples: int | None = None
     sample_log_limit: int = 5
     stats: RetrieverStats = field(default_factory=RetrieverStats)
@@ -344,7 +351,11 @@ class DeepStreamFrameRetrieverCore:
                     gpu_array = None
 
                     # Enqueue the frame for TensorRT processing.
-                    task = FrameTask(packet)
+                    task = FrameTask(
+                        packet,
+                        camera_id=self.camera_id,
+                        camera_config_version=self.camera_config_version,
+                    )
 
                     self._enqueue_with_abort(task)
 
@@ -553,14 +564,11 @@ class TensorRTEventWorker:
 
             if is_event:
                 store_started = time.perf_counter()
-                frame_args = dict(
+                image, boxed = self.frame_store.put_pair(
                     source_session_id=self.options.session_id,
                     frame_sequence=packet.frame_sequence,
                     rgb_array=inference.frame_rgb,
-                )
-                image = self.frame_store.put_rgb(**frame_args)
-                boxed = self.frame_store.put_rgb(
-                    **frame_args, boxes=[item.bbox_xyxy for item in qualifying]
+                    boxes=[item.bbox_xyxy for item in qualifying],
                 )
                 boxed_metadata = {
                     "storage_key": boxed.storage_key,
@@ -605,17 +613,19 @@ class TensorRTEventWorker:
 
             message = build_inference_result(
                 result_data,
-                camera_id=self.options.camera_id,
+                camera_id=task.camera_id,
                 source_session_id=self.options.session_id,
                 frame_sequence=packet.frame_sequence,
                 captured_at_ms=packet.captured_at_ms,
                 worker_id="tensorrt-yolo11n-worker-01",
+                camera_config_version=task.camera_config_version,
                 processed_at_ms=processed_at_ms,
             )
 
             manifest_record = {
                 "schema_version": "1.0",
-                "camera_id": self.options.camera_id,
+                "camera_id": task.camera_id,
+                "camera_config_version": task.camera_config_version,
                 "source_session_id": self.options.session_id,
                 "frame_id": message.frame_id,
                 "frame_sequence": packet.frame_sequence,
@@ -707,6 +717,7 @@ class KafkaEventVerifier:
     model_id: str
     camera_id: str
     session_id: str
+    camera_config_version: int
     frame_store: EventFrameStore
 
     def wait_for_assignment(self, timeout_seconds: float = 30.0) -> None:
@@ -776,6 +787,11 @@ class KafkaEventVerifier:
             )
             if result.camera_id != self.camera_id:
                 raise AssertionError("Kafka result camera_id mismatch")
+            if int(result.camera_config_version) != self.camera_config_version:
+                raise AssertionError(
+                    f"Kafka result configuration revision {result.camera_config_version} "
+                    f"does not match the session revision {self.camera_config_version}"
+                )
             sequence = int(result.frame_sequence)
             if sequence not in expected_by_sequence:
                 raise AssertionError(f"Unexpected sampled frame sequence: {sequence}")
@@ -819,6 +835,7 @@ class KafkaEventVerifier:
             "topic": self.topic,
             "model_id": self.model_id,
             "camera_id": self.camera_id,
+            "camera_config_version": self.camera_config_version,
         }
 
 
@@ -885,6 +902,7 @@ class TensorRTEventPipelineApplication:
             model_id=yolo.model_id,
             camera_id=self.options.camera_id,
             session_id=self.options.session_id,
+            camera_config_version=self.options.camera_config_version,
             frame_store=frame_store,
         )
 
@@ -908,6 +926,8 @@ class TensorRTEventPipelineApplication:
             frame_queue=frame_queue,
             sampler=sampler,
             fatal_event=fatal_event,
+            camera_id=self.options.camera_id,
+            camera_config_version=self.options.camera_config_version,
             max_samples=self.options.max_samples,
         )
 
@@ -954,7 +974,11 @@ class TensorRTEventPipelineApplication:
         print("DEEPSTREAM + ONE CAMERA + YOLO11N TENSORRT FP16 + EVENT STORAGE + KAFKA")
         print("=" * 76)
         print(f"Source: {self.options.source}")
-        print(f"Camera ID: {self.options.camera_id}")
+        print(
+            f"Camera ID: {self.options.camera_id} "
+            f"config_version={self.options.camera_config_version} "
+            "(pinned for this session)"
+        )
         print(f"Session ID: {self.options.session_id}")
         print(f"Engine: {self.options.engine_path}")
         print(f"GPU: {self.options.gpu_id}")
@@ -1091,6 +1115,7 @@ class TensorRTEventPipelineApplication:
             "gpu_id": self.options.gpu_id,
             "source_video": str(self.options.source),
             "camera_id": self.options.camera_id,
+            "camera_config_version": self.options.camera_config_version,
             "source_session_id": self.options.session_id,
             "sample_fps_target": self.options.sample_fps,
             "sample_interval_ms": 1000.0 / self.options.sample_fps,
@@ -1255,7 +1280,12 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
     return parser
 
 
-def main(argv: list[str] | None = None, *, event_root: str) -> dict[str, Any]:
+def main(
+    argv: list[str] | None = None,
+    *,
+    event_root: str,
+    camera_config_version: int,
+) -> dict[str, Any]:
     settings = load_settings()
     raw = _load_tensorrt_config(settings)
     parser = build_parser(settings, raw)
@@ -1264,6 +1294,7 @@ def main(argv: list[str] | None = None, *, event_root: str) -> dict[str, Any]:
     options = TensorRTEventPipelineOptions(
         source=settings.paths.resolve(args.source),
         camera_id=args.camera_id,
+        camera_config_version=camera_config_version,
         gpu_id=args.gpu_id,
         sample_fps=args.sample_fps,
         fallback_source_fps=args.fallback_source_fps,

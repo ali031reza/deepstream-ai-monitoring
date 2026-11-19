@@ -4,6 +4,8 @@ import hashlib
 
 from psycopg.types.json import Jsonb
 
+from src.database.camera_config import event_config_version
+
 
 class DatabaseBatchRepository:
     def __init__(self, database):
@@ -26,7 +28,8 @@ class DatabaseBatchRepository:
                 datetime.fromtimestamp(result.captured_at_ms / 1000, tz=timezone.utc),
                 result.source_video_ms, result.event_storage_root,
                 result.storage_key, result.image_size_bytes, result.image_sha256,
-                result.boxed_key, result.boxed_bytes, result.boxed_sha256, Jsonb(detections), digest,
+                result.boxed_key, result.boxed_bytes, result.boxed_sha256, Jsonb(detections),
+                event_config_version(result.camera_config_version), digest,
             )
         if not rows:
             return
@@ -35,8 +38,8 @@ class DatabaseBatchRepository:
                 INSERT INTO camera_events (
                     event_id, camera_id, source_session_id, frame_sequence, model_id, event_type,
                     event_at, source_video_ms, event_storage_root, clean_key, clean_bytes, clean_sha256,
-                    boxed_key, boxed_bytes, boxed_sha256, detections, payload_sha256
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    boxed_key, boxed_bytes, boxed_sha256, detections, config_version, payload_sha256
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (event_id) DO NOTHING
             """, rows.values())
             cur.execute("SELECT event_id, payload_sha256 FROM camera_events WHERE event_id = ANY(%s)",

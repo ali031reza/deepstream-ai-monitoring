@@ -57,6 +57,11 @@ def validate_inference_result(
     if message.frame_sequence < 0 or message.frame_sequence > MAX_SIGNED_BIGINT:
         errors.append("frame_sequence is outside PostgreSQL BIGINT range")
 
+    # 0 is the proto3 default for producers that did not send field 29.
+    # Those messages stay unversioned. A positive value must fit INTEGER.
+    if message.camera_config_version > MAX_SIGNED_INTEGER:
+        errors.append("camera_config_version exceeds PostgreSQL INTEGER range")
+
     if message.gpu_id > MAX_SIGNED_INTEGER:
         errors.append("gpu_id exceeds PostgreSQL INTEGER range")
 

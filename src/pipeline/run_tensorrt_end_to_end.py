@@ -56,18 +56,16 @@ def _without_option(arguments: list[str], flag: str) -> list[str]:
 
 
 def load_camera(database, camera_id):
-    with database.transaction() as conn, conn.cursor() as cur:
-        try:
-            cur.execute("SELECT zone, available_models, current_model, event_storage_root, event_bucket "
-                        "FROM cameras WHERE camera_id = %s", (camera_id,))
-            row = cur.fetchone()
-            cur.execute("SELECT event_at, event_bucket, clean_key, boxed_key FROM camera_events LIMIT 0")
-        except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
-            raise RuntimeError("Apply PostgreSQL migrations 004_camera_events.sql and 005_event_bucket.sql first") from exc
-    if not row or row[2] != "person":
-        raise ValueError(f"Camera {camera_id!r} must be registered with current_model=person")
-    return dict(camera_id=camera_id, zone=row[0], available_models=row[1],
-                current_model=row[2], event_storage_root=row[3], event_bucket=row[4])
+    from src.database.camera_config import load_applied_camera
+    try:
+        with database.transaction() as conn, conn.cursor() as cur:
+            cur.execute("SELECT event_at, event_bucket, clean_key, boxed_key, config_version FROM camera_events LIMIT 0")
+        return load_applied_camera(database, camera_id)
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
+        raise RuntimeError(
+            "Apply PostgreSQL migrations 004_camera_events.sql, 005_event_bucket.sql, "
+            "and 006_camera_config_revisions.sql first"
+        ) from exc
 
 
 def wait_for_session_offsets(bootstrap, group, topic, offsets, timeout, processor):
@@ -354,6 +352,7 @@ def main(argv: list[str] | None = None) -> dict:
     try:
         print(
             f"[E2E] session={session_id} model={settings.yolo.model_id} "
+            f"camera={camera_id} config_version={camera['config_version']} "
             f"topic={configured_topic} consumer_group={group_id}",
             flush=True,
         )
@@ -376,7 +375,11 @@ def main(argv: list[str] | None = None) -> dict:
         producer_args.extend(["--session-id", session_id])
         from src.pipeline.run_tensorrt_event_pipeline import main as run_producer
 
-        producer_report = run_producer(producer_args, event_root=camera["event_storage_root"])
+        producer_report = run_producer(
+            producer_args,
+            event_root=camera["event_storage_root"],
+            camera_config_version=int(camera["config_version"]),
+        )
         sampled = int(producer_report["frames_sampled"])
         expected_events = int(producer_report.get("event_frames_saved", 0))
         store_stats = producer_report.get("event_image_store_stats", {})
