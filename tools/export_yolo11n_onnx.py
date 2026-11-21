@@ -19,7 +19,7 @@ def main() -> None:
     settings = load_settings()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--weights", default=str(settings.yolo.weights))
-    parser.add_argument("--output", default=None)
+    parser.add_argument("--output", default=str(settings.tensorrt.onnx))
     parser.add_argument("--image-size", type=int, default=settings.yolo.image_size)
     parser.add_argument("--opset", type=int, default=17)
     args = parser.parse_args()
@@ -32,11 +32,7 @@ def main() -> None:
     if args.image_size <= 0 or args.opset < 13:
         parser.error("--image-size must be positive and --opset must be >= 13")
 
-    output = (
-        settings.paths.resolve(args.output)
-        if args.output
-        else weights.with_name("yolo11n.onnx")
-    )
+    output = settings.paths.resolve(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
 
     model = YOLO(str(weights))

@@ -124,6 +124,67 @@ class DatabaseSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ObjectStoreSettings:
+    endpoint: str
+    host_endpoint: str
+    access_key: str
+    region: str
+    password_env: str
+
+    def __post_init__(self) -> None:
+        for name in ("endpoint", "host_endpoint", "access_key", "region", "password_env"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"object_store.{name} must be a nonempty string")
+        if not self.endpoint.startswith("http"):
+            raise ValueError("object_store.endpoint must be an http(s) URL")
+
+    def client_kwargs(self) -> dict[str, str]:
+        secret = os.environ.get(self.password_env)
+        if not secret:
+            raise ValueError(
+                f"Object store password missing: set {self.password_env} in .env or environment"
+            )
+        return {
+            "endpoint_url": os.environ.get("OBJECT_STORE_ENDPOINT", self.endpoint),
+            "aws_access_key_id": os.environ.get("OBJECT_STORE_ACCESS_KEY", self.access_key),
+            "aws_secret_access_key": secret,
+            "region_name": self.region,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TensorRTPipelineSettings:
+    engine: Path
+    onnx: Path
+    batch_width: int
+    batch_height: int
+    sample_fps: float
+    fallback_source_fps: float
+    detection_class: str
+    execution_mode: str
+    event_every_nth_sample: int
+    event_type: str
+    result_root: Path
+    workspace_gib: float
+    verification_timeout_seconds: float
+    processor_startup_timeout_seconds: float
+
+    def __post_init__(self) -> None:
+        _positive(self.batch_width, "tensorrt_pipeline.batch_width")
+        _positive(self.batch_height, "tensorrt_pipeline.batch_height")
+        _positive(self.event_every_nth_sample, "tensorrt_pipeline.event_every_nth_sample")
+        for name in ("sample_fps", "fallback_source_fps", "workspace_gib",
+                     "verification_timeout_seconds", "processor_startup_timeout_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise ValueError(f"tensorrt_pipeline.{name} must be positive")
+        for name in ("detection_class", "execution_mode", "event_type"):
+            if not getattr(self, name).strip():
+                raise ValueError(f"tensorrt_pipeline.{name} must be a nonempty string")
+
+
+@dataclass(frozen=True, slots=True)
 class KafkaSettings:
     bootstrap_servers: str
     topics: dict[str, str]
@@ -173,6 +234,8 @@ class AppSettings:
     events: EventSettings
     kafka: KafkaSettings
     database: DatabaseSettings
+    object_store: ObjectStoreSettings
+    tensorrt: TensorRTPipelineSettings
     database_timeout_seconds: float
     metrics_directory: Path
 
@@ -222,9 +285,32 @@ class ConfigurationLoader:
         kafka = KafkaSettings.from_mapping(_section(raw, "kafka"))
         if set(kafka.topics) != {yolo.model_id}:
             raise ValueError("Configure exactly one Kafka result topic for the YOLO model")
+        object_store = ObjectStoreSettings(**_section(raw, "object_store"))
+        tensorrt_data = _section(raw, "tensorrt_pipeline")
+        tensorrt = TensorRTPipelineSettings(
+            engine=self.paths.resolve(tensorrt_data["engine"]),
+            onnx=self.paths.resolve(tensorrt_data["onnx"]),
+            batch_width=_positive(tensorrt_data["batch_width"], "tensorrt_pipeline.batch_width"),
+            batch_height=_positive(tensorrt_data["batch_height"], "tensorrt_pipeline.batch_height"),
+            sample_fps=float(tensorrt_data["sample_fps"]),
+            fallback_source_fps=float(tensorrt_data["fallback_source_fps"]),
+            detection_class=str(tensorrt_data["detection_class"]),
+            execution_mode=str(tensorrt_data["execution_mode"]),
+            event_every_nth_sample=_positive(
+                tensorrt_data["event_every_nth_sample"], "tensorrt_pipeline.event_every_nth_sample"
+            ),
+            event_type=str(tensorrt_data["event_type"]),
+            result_root=self.paths.resolve(tensorrt_data["result_root"]),
+            workspace_gib=float(tensorrt_data["workspace_gib"]),
+            verification_timeout_seconds=float(tensorrt_data["verification_timeout_seconds"]),
+            processor_startup_timeout_seconds=float(
+                tensorrt_data["processor_startup_timeout_seconds"]
+            ),
+        )
         return AppSettings(
             paths=self.paths, source=source,
             yolo=yolo, queues=queue, events=events, kafka=kafka, database=db,
+            object_store=object_store, tensorrt=tensorrt,
             database_timeout_seconds=float(raw["database_timeout_seconds"]),
             metrics_directory=self.paths.resolve(raw["metrics_directory"]),
         )

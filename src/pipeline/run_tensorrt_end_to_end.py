@@ -246,7 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", default=None, help="Application YAML configuration")
     parser.add_argument("--db-timeout", type=float, default=None)
-    parser.add_argument("--processor-startup-timeout", type=float, default=60.0)
+    parser.add_argument("--processor-startup-timeout", type=float, default=None)
     parser.add_argument("--consumer-group", default=None)
     parser.add_argument("--session-id", default=None)
     parser.add_argument("--metrics-dir", default=None)
@@ -259,7 +259,10 @@ def main(argv: list[str] | None = None) -> dict:
 
     if args.db_timeout is not None and args.db_timeout <= 0:
         parser.error("--db-timeout must be positive")
-    if args.processor_startup_timeout <= 0:
+    if (
+        args.processor_startup_timeout is not None
+        and args.processor_startup_timeout <= 0
+    ):
         parser.error("--processor-startup-timeout must be positive")
     if "--no-kafka-verify" in producer_args:
         parser.error(
@@ -273,10 +276,13 @@ def main(argv: list[str] | None = None) -> dict:
     if bootstrap_override:
         os.environ["KAFKA_BOOTSTRAP_SERVERS"] = bootstrap_override
 
+    from configs.paths import ProjectPaths
+
+    paths = ProjectPaths.from_environment()
     config_candidate = (
         args.config
         or os.environ.get("APP_CONFIG_PATH")
-        or "configs/config.yaml"
+        or paths.config_file
     )
     settings = load_settings(config_candidate)
     config_path = settings.paths.resolve(config_candidate)
@@ -375,10 +381,15 @@ def main(argv: list[str] | None = None) -> dict:
             env=environment,
             cwd=settings.paths.root,
         )
+        startup_timeout = (
+            args.processor_startup_timeout
+            if args.processor_startup_timeout is not None
+            else settings.tensorrt.processor_startup_timeout_seconds
+        )
         group_ready = wait_for_consumer_group(
             kafka_bootstrap,
             group_id,
-            args.processor_startup_timeout,
+            startup_timeout,
             processor,
         )
 

@@ -17,15 +17,9 @@ from configs.settings import load_settings
 def main() -> None:
     settings = load_settings()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--onnx",
-        default=str(settings.paths.resolve("artifacts/models/yolo11n.onnx")),
-    )
-    parser.add_argument(
-        "--engine",
-        default=str(settings.paths.resolve("artifacts/models/yolo11n_fp16.engine")),
-    )
-    parser.add_argument("--workspace-gib", type=float, default=2.0)
+    parser.add_argument("--onnx", default=str(settings.tensorrt.onnx))
+    parser.add_argument("--engine", default=str(settings.tensorrt.engine))
+    parser.add_argument("--workspace-gib", type=float, default=settings.tensorrt.workspace_gib)
     args = parser.parse_args()
 
     onnx_path = settings.paths.resolve(args.onnx)

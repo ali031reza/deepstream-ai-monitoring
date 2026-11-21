@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-import yaml
 from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
 
 from configs.settings import AppSettings, load_settings
@@ -1015,7 +1014,7 @@ class TensorRTEventPipelineApplication:
         )
         worker_thread = threading.Thread(
             target=worker.run,
-            name="tensorrt-yolo11n-worker-01",
+            name=f"tensorrt-{self.settings.yolo.model_id}-worker",
             daemon=False,
         )
 
@@ -1253,21 +1252,10 @@ class TensorRTEventPipelineApplication:
         return summary
 
 
-def _load_tensorrt_config(settings: AppSettings) -> dict[str, Any]:
-    config_path = settings.paths.resolve(
-        os.environ.get("APP_CONFIG_PATH") or settings.paths.config_file
-    )
-    with config_path.open("r", encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
-    section = raw.get("tensorrt_pipeline", {})
-    if not isinstance(section, dict):
-        raise ValueError("tensorrt_pipeline must be a YAML mapping")
-    return section
-
-
-def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.ArgumentParser:
+def build_parser(settings: AppSettings) -> argparse.ArgumentParser:
+    tensorrt = settings.tensorrt
     model_id = settings.yolo.model_id
-    default_topic = settings.kafka.topics.get(model_id, f"{model_id}-results")
+    default_topic = settings.kafka.topics[model_id]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default=str(settings.yolo.source))
     parser.add_argument(
@@ -1275,12 +1263,9 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
         default=settings.source.camera_id,
     )
     parser.add_argument("--gpu-id", type=nonnegative_int, default=settings.yolo.gpu_id)
+    parser.add_argument("--sample-fps", type=float, default=tensorrt.sample_fps)
     parser.add_argument(
-        "--sample-fps", type=float, default=float(raw.get("sample_fps", 8.0))
-    )
-    parser.add_argument(
-        "--fallback-source-fps", type=float,
-        default=float(raw.get("fallback_source_fps", 30.0)),
+        "--fallback-source-fps", type=float, default=tensorrt.fallback_source_fps,
     )
     parser.add_argument(
         "--queue-size", type=positive_int,
@@ -1289,46 +1274,32 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
     parser.add_argument(
         "--batch-width",
         type=positive_int,
-        default=positive_int(str(raw.get("batch_width", 1280))),
+        default=tensorrt.batch_width,
         help="DeepStream batched frame width; match source resolution to avoid resizing",
     )
     parser.add_argument(
         "--batch-height",
         type=positive_int,
-        default=positive_int(str(raw.get("batch_height", 720))),
+        default=tensorrt.batch_height,
         help="DeepStream batched frame height; match source resolution to avoid resizing",
     )
-    parser.add_argument(
-        "--engine",
-        default=str(settings.paths.resolve(raw.get(
-            "engine", "artifacts/models/yolo11n_fp16.engine"
-        ))),
-    )
+    parser.add_argument("--engine", default=str(tensorrt.engine))
     parser.add_argument(
         "--event-min-confidence", type=float,
         default=settings.events.minimum_confidence,
     )
-    parser.add_argument(
-        "--detection-class", default=str(raw.get("detection_class", "person"))
-    )
+    parser.add_argument("--detection-class", default=tensorrt.detection_class)
     parser.add_argument(
         "--event-every-nth-sample", type=positive_int,
-        default=positive_int(str(raw.get("event_every_nth_sample", 1))),
+        default=tensorrt.event_every_nth_sample,
     )
-    parser.add_argument(
-        "--event-type", default=str(raw.get("event_type", "person_detected"))
-    )
+    parser.add_argument("--event-type", default=tensorrt.event_type)
     parser.add_argument("--topic", default=default_topic)
     parser.add_argument(
         "--kafka-bootstrap-servers",
         default=settings.kafka.bootstrap_servers,
     )
-    parser.add_argument(
-        "--result-root",
-        default=str(settings.paths.resolve(raw.get(
-            "result_root", "artifacts/results/yolo11n-person"
-        ))),
-    )
+    parser.add_argument("--result-root", default=str(tensorrt.result_root))
     parser.add_argument(
         "--jpeg-quality", type=positive_int,
         default=settings.events.jpeg_quality,
@@ -1338,7 +1309,10 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
         "--max-samples", type=positive_int, default=None,
         help="Cap inference to the first N sampled frames; DeepStream still decodes to EOS",
     )
-    parser.add_argument("--verification-timeout", type=float, default=90.0)
+    parser.add_argument(
+        "--verification-timeout", type=float,
+        default=tensorrt.verification_timeout_seconds,
+    )
     return parser
 
 
@@ -1349,8 +1323,7 @@ def main(
     camera_config_version: int,
 ) -> dict[str, Any]:
     settings = load_settings()
-    raw = _load_tensorrt_config(settings)
-    parser = build_parser(settings, raw)
+    parser = build_parser(settings)
     args = parser.parse_args(argv)
 
     options = TensorRTEventPipelineOptions(

@@ -81,9 +81,12 @@ def load_camera_config_file(path: Path) -> CameraConfigFile:
     return CameraConfigFile(camera_id, zone, region, available, active, root)
 
 
-# This runner executes one real model. The schema may list more.
-SUPPORTED_EXECUTION_MODE = "person-only"
-SUPPORTED_ACTIVE_MODELS = frozenset({"person"})
+def _execution_constraints() -> tuple[str, frozenset[str]]:
+    """The runner executes the detection class named in configs/config.yaml."""
+    from configs.settings import load_settings
+
+    tensorrt = load_settings().tensorrt
+    return tensorrt.execution_mode, frozenset({tensorrt.detection_class})
 
 
 def load_applied_camera(database, camera_id: str) -> dict:
@@ -100,23 +103,29 @@ def load_applied_camera(database, camera_id: str) -> dict:
         )
         row = cur.fetchone()
     if row is None:
+        from configs.paths import ProjectPaths
+
+        paths = ProjectPaths.from_environment()
+        config_file = paths.camera_config_file(camera_id)
         raise RuntimeError(
             f"Camera {camera_id!r} has no applied configuration revision. "
             "Apply migration 008_expand_camera_schema.sql and "
             "docker compose run --rm --no-deps -T dev python3 -m tools.apply_camera_config "
-            "infra/postgres/cameras_counfig/camera-01.yaml"
+            f"{config_file.relative_to(paths.root).as_posix()}"
         )
     version, zone, region, root, event_bucket, available, active = row
     active_models = list(active or [])
-    if frozenset(active_models) != SUPPORTED_ACTIVE_MODELS:
+    execution_mode, supported_models = _execution_constraints()
+    if frozenset(active_models) != supported_models:
         raise ValueError(
-            f"Execution mode {SUPPORTED_EXECUTION_MODE!r} requires active model person. "
+            f"Execution mode {execution_mode!r} requires active model "
+            f"{next(iter(supported_models))}. "
             f"Camera {camera_id!r} active models are {active_models}. "
             "Additional models may be assigned, but this runner does not execute them."
         )
     return {
         "camera_id": camera_id,
-        "execution_mode": SUPPORTED_EXECUTION_MODE,
+        "execution_mode": execution_mode,
         "event_bucket": event_bucket,
         "config_version": int(version),
         "zone": zone,

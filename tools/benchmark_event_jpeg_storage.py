@@ -13,30 +13,26 @@ import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
-from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw
 
+from configs.settings import load_settings
+from src.database.camera_config import load_camera_config_file
 from src.storage.event_frame_store import EventFrameStore
 
 BOXES = ((480.0, 220.0, 860.0, 980.0), (1040.0, 180.0, 1460.0, 1000.0))
 
 
-def _load_env() -> None:
-    for line in Path(".env").read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+def _prepare_host_endpoint(settings) -> None:
     os.environ["OBJECT_STORE_ENDPOINT"] = os.environ.get(
-        "OBJECT_STORE_ENDPOINT_HOST", "http://127.0.0.1:9000"
+        "OBJECT_STORE_ENDPOINT_HOST", settings.object_store.host_endpoint
     )
 
 
-def _frames(limit: int) -> list[np.ndarray]:
+def _frames(settings, limit: int) -> list[np.ndarray]:
     paths = sorted(
-        path for path in Path("artifacts/event_frames").rglob("*.jpg")
+        path for path in settings.paths.event_frames.rglob("*.jpg")
         if not path.name.endswith(".boxed.jpg")
     )
     if len(paths) < limit:
@@ -263,11 +259,18 @@ def main() -> None:
     parser.add_argument("--frames", type=int, default=80)
     parser.add_argument("--warmup", type=int, default=5)
     args = parser.parse_args()
-    _load_env()
-    frames = _frames(args.frames + args.warmup)
-    store = EventFrameStore("s3://camera-events/events/camera-01", quality=88)
+    settings = load_settings()
+    _prepare_host_endpoint(settings)
+    camera = load_camera_config_file(
+        settings.paths.camera_config_file(settings.source.camera_id)
+    )
+    frames = _frames(settings, args.frames + args.warmup)
+    store = EventFrameStore(camera.event_storage_root, quality=settings.events.jpeg_quality)
     uploader = _Uploader(store)
-    clients = (store.client, EventFrameStore("s3://camera-events/events/camera-01", quality=88).client)
+    clients = (
+        store.client,
+        EventFrameStore(camera.event_storage_root, quality=settings.events.jpeg_quality).client,
+    )
     pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="jpeg-bench")
     stamp = int(time.time())
     strategies = (

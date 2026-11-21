@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 from io import BytesIO
-import os
 from pathlib import PurePosixPath
 import threading
 import time
@@ -33,6 +32,16 @@ class EventImage:
     image_sha256: str
 
 
+def _object_store_client():
+    from configs.settings import load_settings
+
+    return boto3.client(
+        "s3",
+        config=Config(s3={"addressing_style": "path"}),
+        **load_settings().object_store.client_kwargs(),
+    )
+
+
 class EventFrameStore:
     def __init__(self, root: str, *, quality: int = 88, client=None):
         uri = urlsplit(root)
@@ -42,11 +51,7 @@ class EventFrameStore:
         self.bucket = uri.netloc
         self.root = root.rstrip("/")
         self.quality = quality
-        self.client = client or boto3.client(
-            "s3", endpoint_url=os.getenv("OBJECT_STORE_ENDPOINT", "http://object-store:9000"),
-            aws_access_key_id="camera-store", aws_secret_access_key=os.environ["OBJECT_STORE_PASSWORD"],
-            region_name="us-east-1", config=Config(s3={"addressing_style": "path"}),
-        )
+        self.client = client or _object_store_client()
         if client is None:
             self._ensure_bucket()
         self._stats_lock = threading.Lock()

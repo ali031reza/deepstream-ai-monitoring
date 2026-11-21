@@ -72,13 +72,24 @@ yolo:
   max_detections: 300
 tensorrt_pipeline:
   engine: artifacts/models/yolo11n_fp16.engine
+  onnx: artifacts/models/yolo11n.onnx
   batch_width: 1920
   batch_height: 1080
   sample_fps: 8.0
   fallback_source_fps: 60.0
   detection_class: person
+  execution_mode: person-only
   event_every_nth_sample: 1
   event_type: person_detected
   result_root: artifacts/results/yolo11n-person
+  workspace_gib: 2
+  verification_timeout_seconds: 90
+  processor_startup_timeout_seconds: 60
+object_store:
+  endpoint: http://object-store:9000
+  host_endpoint: http://127.0.0.1:9000
+  access_key: camera-store
+  region: us-east-1
+  password_env: OBJECT_STORE_PASSWORD
 database_timeout_seconds: 300
 metrics_directory: artifacts/benchmarks
