@@ -13,7 +13,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import hashlib
 from io import BytesIO
-import os
 from pathlib import PurePosixPath
 import threading
 import time
@@ -33,6 +32,16 @@ class EventImage:
     image_sha256: str
 
 
+def _object_store_client():
+    from configs.settings import load_settings
+
+    return boto3.client(
+        "s3",
+        config=Config(s3={"addressing_style": "path"}),
+        **load_settings().object_store.client_kwargs(),
+    )
+
+
 class EventFrameStore:
     def __init__(self, root: str, *, quality: int = 88, client=None):
         uri = urlsplit(root)
@@ -42,11 +51,7 @@ class EventFrameStore:
         self.bucket = uri.netloc
         self.root = root.rstrip("/")
         self.quality = quality
-        self.client = client or boto3.client(
-            "s3", endpoint_url=os.getenv("OBJECT_STORE_ENDPOINT", "http://object-store:9000"),
-            aws_access_key_id="camera-store", aws_secret_access_key=os.environ["OBJECT_STORE_PASSWORD"],
-            region_name="us-east-1", config=Config(s3={"addressing_style": "path"}),
-        )
+        self.client = client or _object_store_client()
         if client is None:
             self._ensure_bucket()
         self._stats_lock = threading.Lock()
@@ -76,7 +81,17 @@ class EventFrameStore:
 
     @staticmethod
     def boxed_key(clean_key):
+        """Legacy boxed object name. Existing rows keep this key."""
         return str(PurePosixPath(clean_key).with_suffix(".boxed.jpg"))
+
+    @staticmethod
+    def boxed_key_for(clean_key: str, model_id: str) -> str:
+        """Boxed object for one model, so another model can keep its own annotations."""
+        model = model_id.strip()
+        if not model or "/" in model or "\\" in model or model in {".", ".."}:
+            raise ValueError("model_id must be a single path segment")
+        stem = str(PurePosixPath(clean_key).with_suffix(""))
+        return f"{stem}.{model}.boxed.jpg"
 
     def _encode(self, image: Image.Image) -> bytes:
         buffer = BytesIO()
@@ -126,11 +141,13 @@ class EventFrameStore:
         self._put_object(key, payload, digest, counter, time.perf_counter())
         return EventImage(key, "jpeg", len(payload), digest)
 
-    def put_pair(self, *, source_session_id, frame_sequence, rgb_array, boxes):
+    def put_pair(self, *, source_session_id, frame_sequence, rgb_array, boxes, model_id=None):
         """Encode the clean and boxed JPEGs, upload them together, and wait for both acks."""
         started = time.perf_counter()
         clean_key = f"{self.prefix}/{source_session_id}/{frame_sequence:012d}.jpg"
-        boxed_key = self.boxed_key(clean_key)
+        boxed_key = (
+            self.boxed_key_for(clean_key, model_id) if model_id else self.boxed_key(clean_key)
+        )
         image = Image.fromarray(rgb_array)
 
         encode_started = time.perf_counter()

@@ -179,11 +179,23 @@ def build_inference_result(
         result.boxed_sha256 = model_output["boxed_sha256"]
         result.boxed_bytes = model_output["boxed_bytes"]
         result.source_video_ms = model_output["source_video_ms"]
-        result.event = _required_string(model_output.get("event"), "event")
-        result.confidence = _finite_float(model_output.get("confidence"), "confidence")
-        if not 0 < result.confidence <= 1:
-            raise ValueError("confidence must be between 0 and 1")
-        result.person_id = _required_string(model_output.get("person_id"), "person_id")
+        result.primary_class = _required_string(
+            model_output.get("primary_class"), "primary_class"
+        )
+        result.primary_confidence = _finite_float(
+            model_output.get("primary_confidence"), "primary_confidence"
+        )
+        if not 0 < result.primary_confidence <= 1:
+            raise ValueError("primary_confidence must be between 0 and 1")
+        if "primary_detection_index" not in model_output:
+            raise ValueError("primary_detection_index is required")
+        result.primary_detection_index = _nonnegative_int(
+            model_output.get("primary_detection_index"), "primary_detection_index"
+        )
+
+    engine_digest = model_output.get("engine_digest")
+    if engine_digest is not None:
+        result.engine_digest = _required_string(engine_digest, "engine_digest")
 
     # Convert detections.
     detections = model_output.get("detections", [])

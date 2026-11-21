@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from collections import Counter
 import argparse
-from dataclasses import asdict, dataclass, field
+import hashlib
+import socket
+from dataclasses import asdict, dataclass, field, replace
 import json
 import os
 import queue
@@ -19,7 +21,6 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-import yaml
 from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
 
 from configs.settings import AppSettings, load_settings
@@ -47,31 +48,41 @@ def positive_int(value: str) -> int:
     return number
 
 
-def _assign_person_ids(detections: list[dict[str, Any]], frame_sequence: int) -> None:
-    """Number people inside one frame. 1 is the highest confidence."""
-    ordinal = 0
-    for item in detections:
-        if str(item.get("class_name", "")).casefold() != "person":
-            continue
-        ordinal += 1
-        item["person_id"] = f"{frame_sequence}:{ordinal}"
-
-
-def _primary_person(
+def select_primary_detection(
     detections: list[dict[str, Any]],
     *,
     detection_class: str,
     minimum_confidence: float,
-) -> dict[str, Any]:
-    for item in detections:
-        if item.get("class_name", "").casefold() != detection_class.casefold():
+) -> int:
+    """Return the zero-based index of the highest-confidence qualifying detection.
+
+    Equal scores keep the earliest element. The list order is not changed.
+    """
+    best: int | None = None
+    wanted = detection_class.casefold()
+    for index, item in enumerate(detections):
+        if str(item.get("class_name", "")).casefold() != wanted:
             continue
-        if float(item["confidence"]) < minimum_confidence:
+        confidence = float(item["confidence"])
+        if confidence < minimum_confidence:
             continue
-        if not item.get("person_id"):
-            continue
-        return item
-    raise RuntimeError("A qualifying event has no person detection")
+        if best is None or confidence > float(detections[best]["confidence"]):
+            best = index
+    if best is None:
+        raise RuntimeError("A qualifying event has no detection inside the stored array")
+    return best
+
+
+def runtime_worker_id() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def nonnegative_int(value: str) -> int:
@@ -93,6 +104,7 @@ class TensorRTEventPipelineOptions:
     batch_width: int
     batch_height: int
     engine_path: Path
+    engine_digest: str
     event_root: str
     event_min_confidence: float
     detection_class: str
@@ -572,7 +584,6 @@ class TensorRTEventWorker:
             packet.release()
 
             detections = [item.to_payload() for item in inference.detections]
-            _assign_person_ids(detections, packet.frame_sequence)
             qualifying = [
                 item for item in inference.detections
                 if item.class_id in self.settings.yolo.classes
@@ -597,6 +608,7 @@ class TensorRTEventWorker:
                     frame_sequence=packet.frame_sequence,
                     rgb_array=inference.frame_rgb,
                     boxes=[item.bbox_xyxy for item in qualifying],
+                    model_id=self.settings.yolo.model_id,
                 )
                 boxed_metadata = {
                     "storage_key": boxed.storage_key,
@@ -614,6 +626,7 @@ class TensorRTEventWorker:
                 "model_input_size": self.settings.yolo.image_size,
                 "status": "processed",
                 "is_event": is_event,
+                "engine_digest": self.options.engine_digest,
                 "detections": detections,
                 "timings_ms": {
                     "queue_wait_ms": queue_wait_ms,
@@ -626,11 +639,12 @@ class TensorRTEventWorker:
             }
 
             if image is not None:
-                primary = _primary_person(
+                primary_index = select_primary_detection(
                     detections,
                     detection_class=self.options.detection_class,
                     minimum_confidence=self.options.event_min_confidence,
                 )
+                primary = detections[primary_index]
                 result_data.update({
                     "event_type": self.options.event_type,
                     "storage_key": image.storage_key,
@@ -642,9 +656,9 @@ class TensorRTEventWorker:
                     "image_format": image.image_format,
                     "image_size_bytes": image.image_size_bytes,
                     "image_sha256": image.image_sha256,
-                    "event": primary["class_name"],
-                    "confidence": primary["confidence"],
-                    "person_id": primary["person_id"],
+                    "primary_class": primary["class_name"],
+                    "primary_confidence": primary["confidence"],
+                    "primary_detection_index": primary_index,
                 })
 
             message = build_inference_result(
@@ -653,7 +667,7 @@ class TensorRTEventWorker:
                 source_session_id=self.options.session_id,
                 frame_sequence=packet.frame_sequence,
                 captured_at_ms=packet.captured_at_ms,
-                worker_id="tensorrt-yolo11n-worker-01",
+                worker_id=runtime_worker_id(),
                 camera_config_version=task.camera_config_version,
                 processed_at_ms=processed_at_ms,
             )
@@ -672,6 +686,7 @@ class TensorRTEventWorker:
                 "captured_at_ms": packet.captured_at_ms,
                 "processed_at_ms": processed_at_ms,
                 "model_id": self.settings.yolo.model_id,
+                "engine_digest": self.options.engine_digest,
                 "is_event": is_event,
                 "event_type": self.options.event_type if is_event else None,
                 "detection_count": len(detections),
@@ -754,6 +769,7 @@ class KafkaEventVerifier:
     camera_id: str
     session_id: str
     camera_config_version: int
+    engine_digest: str
     frame_store: EventFrameStore
 
     def wait_for_assignment(self, timeout_seconds: float = 30.0) -> None:
@@ -823,6 +839,8 @@ class KafkaEventVerifier:
             )
             if result.camera_id != self.camera_id:
                 raise AssertionError("Kafka result camera_id mismatch")
+            if result.engine_digest != self.engine_digest:
+                raise AssertionError("Kafka result engine_digest does not match the loaded engine")
             if int(result.camera_config_version) != self.camera_config_version:
                 raise AssertionError(
                     f"Kafka result configuration revision {result.camera_config_version} "
@@ -872,6 +890,7 @@ class KafkaEventVerifier:
             "model_id": self.model_id,
             "camera_id": self.camera_id,
             "camera_config_version": self.camera_config_version,
+            "engine_digest": self.engine_digest,
         }
 
 
@@ -890,6 +909,10 @@ class TensorRTEventPipelineApplication:
         if not self.options.engine_path.is_file():
             raise FileNotFoundError(
                 f"TensorRT engine not found: {self.options.engine_path}"
+            )
+        if not self.options.engine_digest:
+            self.options = replace(
+                self.options, engine_digest=file_sha256(self.options.engine_path)
             )
         if self.settings.yolo.quantize != 16:
             raise ValueError(
@@ -939,6 +962,7 @@ class TensorRTEventPipelineApplication:
             camera_id=self.options.camera_id,
             session_id=self.options.session_id,
             camera_config_version=self.options.camera_config_version,
+            engine_digest=self.options.engine_digest,
             frame_store=frame_store,
         )
 
@@ -990,7 +1014,7 @@ class TensorRTEventPipelineApplication:
         )
         worker_thread = threading.Thread(
             target=worker.run,
-            name="tensorrt-yolo11n-worker-01",
+            name=f"tensorrt-{self.settings.yolo.model_id}-worker",
             daemon=False,
         )
 
@@ -1147,6 +1171,7 @@ class TensorRTEventPipelineApplication:
             "schema_version": "1.0",
             "model_id": yolo.model_id,
             "engine": str(self.options.engine_path),
+            "engine_digest": self.options.engine_digest,
             "gpu_name": worker.detector.gpu_name if worker.detector else "unknown",
             "gpu_id": self.options.gpu_id,
             "source_video": str(self.options.source),
@@ -1227,21 +1252,10 @@ class TensorRTEventPipelineApplication:
         return summary
 
 
-def _load_tensorrt_config(settings: AppSettings) -> dict[str, Any]:
-    config_path = settings.paths.resolve(
-        os.environ.get("APP_CONFIG_PATH") or settings.paths.config_file
-    )
-    with config_path.open("r", encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
-    section = raw.get("tensorrt_pipeline", {})
-    if not isinstance(section, dict):
-        raise ValueError("tensorrt_pipeline must be a YAML mapping")
-    return section
-
-
-def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.ArgumentParser:
+def build_parser(settings: AppSettings) -> argparse.ArgumentParser:
+    tensorrt = settings.tensorrt
     model_id = settings.yolo.model_id
-    default_topic = settings.kafka.topics.get(model_id, f"{model_id}-results")
+    default_topic = settings.kafka.topics[model_id]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default=str(settings.yolo.source))
     parser.add_argument(
@@ -1249,12 +1263,9 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
         default=settings.source.camera_id,
     )
     parser.add_argument("--gpu-id", type=nonnegative_int, default=settings.yolo.gpu_id)
+    parser.add_argument("--sample-fps", type=float, default=tensorrt.sample_fps)
     parser.add_argument(
-        "--sample-fps", type=float, default=float(raw.get("sample_fps", 8.0))
-    )
-    parser.add_argument(
-        "--fallback-source-fps", type=float,
-        default=float(raw.get("fallback_source_fps", 30.0)),
+        "--fallback-source-fps", type=float, default=tensorrt.fallback_source_fps,
     )
     parser.add_argument(
         "--queue-size", type=positive_int,
@@ -1263,46 +1274,32 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
     parser.add_argument(
         "--batch-width",
         type=positive_int,
-        default=positive_int(str(raw.get("batch_width", 1280))),
+        default=tensorrt.batch_width,
         help="DeepStream batched frame width; match source resolution to avoid resizing",
     )
     parser.add_argument(
         "--batch-height",
         type=positive_int,
-        default=positive_int(str(raw.get("batch_height", 720))),
+        default=tensorrt.batch_height,
         help="DeepStream batched frame height; match source resolution to avoid resizing",
     )
-    parser.add_argument(
-        "--engine",
-        default=str(settings.paths.resolve(raw.get(
-            "engine", "artifacts/models/yolo11n_fp16.engine"
-        ))),
-    )
+    parser.add_argument("--engine", default=str(tensorrt.engine))
     parser.add_argument(
         "--event-min-confidence", type=float,
         default=settings.events.minimum_confidence,
     )
-    parser.add_argument(
-        "--detection-class", default=str(raw.get("detection_class", "person"))
-    )
+    parser.add_argument("--detection-class", default=tensorrt.detection_class)
     parser.add_argument(
         "--event-every-nth-sample", type=positive_int,
-        default=positive_int(str(raw.get("event_every_nth_sample", 1))),
+        default=tensorrt.event_every_nth_sample,
     )
-    parser.add_argument(
-        "--event-type", default=str(raw.get("event_type", "person_detected"))
-    )
+    parser.add_argument("--event-type", default=tensorrt.event_type)
     parser.add_argument("--topic", default=default_topic)
     parser.add_argument(
         "--kafka-bootstrap-servers",
         default=settings.kafka.bootstrap_servers,
     )
-    parser.add_argument(
-        "--result-root",
-        default=str(settings.paths.resolve(raw.get(
-            "result_root", "artifacts/results/yolo11n-person"
-        ))),
-    )
+    parser.add_argument("--result-root", default=str(tensorrt.result_root))
     parser.add_argument(
         "--jpeg-quality", type=positive_int,
         default=settings.events.jpeg_quality,
@@ -1312,7 +1309,10 @@ def build_parser(settings: AppSettings, raw: dict[str, Any]) -> argparse.Argumen
         "--max-samples", type=positive_int, default=None,
         help="Cap inference to the first N sampled frames; DeepStream still decodes to EOS",
     )
-    parser.add_argument("--verification-timeout", type=float, default=90.0)
+    parser.add_argument(
+        "--verification-timeout", type=float,
+        default=tensorrt.verification_timeout_seconds,
+    )
     return parser
 
 
@@ -1323,8 +1323,7 @@ def main(
     camera_config_version: int,
 ) -> dict[str, Any]:
     settings = load_settings()
-    raw = _load_tensorrt_config(settings)
-    parser = build_parser(settings, raw)
+    parser = build_parser(settings)
     args = parser.parse_args(argv)
 
     options = TensorRTEventPipelineOptions(
@@ -1338,6 +1337,7 @@ def main(
         batch_width=args.batch_width,
         batch_height=args.batch_height,
         engine_path=settings.paths.resolve(args.engine),
+        engine_digest="",
         event_root=event_root,
         event_min_confidence=args.event_min_confidence,
         detection_class=args.detection_class,

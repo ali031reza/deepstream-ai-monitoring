@@ -37,6 +37,17 @@ class ProjectPaths:
     def benchmarks(self) -> Path:
         return self.root / "artifacts" / "benchmarks"
 
+    @property
+    def event_frames(self) -> Path:
+        return self.root / "artifacts" / "event_frames"
+
+    @property
+    def camera_config_directory(self) -> Path:
+        return self.root / "infra" / "postgres" / "cameras_counfig"
+
+    def camera_config_file(self, camera_id: str) -> Path:
+        return self.camera_config_directory / f"{camera_id}.yaml"
+
     def ensure_directory(self, path: str | Path) -> Path:
         directory = self.resolve(path)
         directory.mkdir(parents=True, exist_ok=True)

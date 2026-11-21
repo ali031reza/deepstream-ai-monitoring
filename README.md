@@ -17,6 +17,7 @@ Kafka is batched on both sides.
 ```mermaid
 flowchart LR
     revision[(Config revision)] --> decode[DeepStream]
+    models[(Model assignments)] --> revision
     clip([Local video]) --> decode
     decode --> trt[[TensorRT FP16]]
     trt --> images[(MinIO)]
@@ -34,10 +35,14 @@ flowchart LR
     class clip io
     class decode,trt gpu
     class publish,writer bus
-    class topic,images,events,revision,dead db
+    class topic,images,events,revision,models,dead db
 ```
 
-The session reads one camera configuration revision from PostgreSQL before the first frame is decoded and copies that revision onto every sampled frame before the frame enters the inference queue. Kafka carries `camera_id` and `camera_config_version` with the model, session, frame sequence, timestamps, detections, and event object keys. A qualifying frame also carries `event` (the model class, `person`), `confidence` of the strongest qualifying person, and `person_id`. `person_id` is `<frame sequence>:<number>`, and number 1 is the highest confidence in that frame. The model does not follow a person into the next frame. Every person in the frame is also listed in `detections` with that person's own `person_id` and `confidence`. PostgreSQL stores the same three values on `camera_events`. Messages from an older producer leave them empty, and the consumer stores NULL. It does not carry credentials, connection settings, or the rest of the camera registry. PostgreSQL stores the revision on `camera_events` and the immutable snapshot in `camera_config_revisions`. A message encoded before field 29 existed has `camera_config_version = 0`; the consumer stores that event with a NULL revision instead of assigning the current configuration. Editing `infra/postgres/cameras_counfig/camera-01.yaml` does not change a session that has already started. The next session loads the latest applied revision. There is no hot reload and no configuration topic.
+The session reads one camera configuration revision from PostgreSQL before the first frame is decoded and copies that revision onto every sampled frame before the frame enters the inference queue. Kafka carries `camera_id`, `camera_config_version`, the logical `model_id`, the `engine_digest` of the loaded TensorRT file, and a runtime `worker_id`. The worker id is diagnostic. It is not part of the event id. An exact retry of the same payload inserts nothing. A recomputed payload from another worker, or one whose timings differ, keeps the stored row and raises a conflict. It does not create a second row.
+
+A qualifying frame carries `primary_class`, `primary_confidence`, and `primary_detection_index`. The index is zero-based into that message's `detections` array. The highest confidence wins, and an equal score keeps the earlier element. Index 0 is a real detection. An older message that omits field 33 leaves the index unknown. Field 32 `person_id` values such as `6090:1` stay legacy text and are not parsed as indexes. The clean JPEG is one object per source frame. The boxed JPEG key includes the model id, so a second model on the same frame cannot overwrite the first model's boxes. Existing rows keep the boxed key they already stored.
+
+Editing `infra/postgres/cameras_counfig/camera-01.yaml` does not change a session that has already started. The next session loads the latest applied revision. There is no hot reload and no configuration topic. This runner's execution mode is `person-only`. The schema can assign more models, including inactive `fire`, but this process does not run them.
 
 At default settings a sampled frame becomes an event when at least one person has confidence **≥ 0.65**. Multiple people in one frame produce one event, with a box around each qualifying person. Both paths still publish one Kafka result per sample. The end-to-end supervisor starts the results processor and waits for Kafka assignment before starting the video.
 
@@ -88,8 +93,12 @@ docker exec postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGR
 docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring' \
   < infra/postgres/migrations/006_camera_config_revisions.sql &&
 docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring' \
-  < infra/postgres/migrations/007_event_observation.sql
+  < infra/postgres/migrations/007_event_observation.sql &&
+docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring' \
+  < infra/postgres/migrations/008_expand_camera_schema.sql
 ```
+
+Migration 008 adds revision-scoped model rows, the `camera_current_config` view, and the event columns `event_bucket_stored`, `primary_class`, `primary_confidence`, `primary_detection_index`, and `engine_digest`. It does not drop the older columns. Migration `009_contract_camera_schema.sql` drops those older columns. Do not apply 009 to the live database until every external reader of the dropped columns has been moved. UI consumers outside this repository were not visible from this checkout.
 
 Migration 006 seeds revision 1 from each camera's existing zone, models, and storage root. It leaves `region` unset when the camera has no region, and it leaves existing events unversioned. The checked-in migrations do not define `camera_model_assignments`. If that table is already present and has `camera_id`, revision 1 snapshots its rows before the revision becomes immutable.
 
@@ -118,17 +127,27 @@ docker compose run --rm -T dev python3 -u -m src.pipeline.run_tensorrt_end_to_en
   --camera-id camera-01 --sample-fps 8 --verification-timeout 600
 ```
 
-`ffprobe` should print `500`. The clip matches `*.mp4` in `.gitignore` and stays untracked. Kafka results must equal sampled frames. PostgreSQL rows must equal qualifying stored events. Each event has one clean JPEG and one boxed JPEG.
+`ffprobe` should print `500`. The clip matches `*.mp4` in `.gitignore` and stays untracked. Kafka results must equal sampled frames. PostgreSQL rows must equal qualifying stored events. Each event has one clean JPEG and one boxed JPEG. The report prints `engine_digest` for the TensorRT file loaded by that session. Historical events leave it NULL.
 
 Join an event back to the revision that applied to its frame:
 
 ```sql
-SELECT e.event_at, e.camera_id, e.config_version, r.zone, r.region,
-       r.available_models, r.active_models, r.event_storage_root
+SELECT e.event_at, e.camera_id, e.config_version, r.zone,
+       active_models.models AS active_models,
+       e.primary_class, e.primary_confidence, e.primary_detection_index,
+       COALESCE(e.event_bucket_stored, e.event_bucket) AS event_bucket,
+       e.clean_key, e.boxed_key
 FROM camera_events AS e
-JOIN camera_config_revisions AS r
+LEFT JOIN camera_config_revisions AS r
   ON r.camera_id = e.camera_id
  AND r.config_version = e.config_version
+LEFT JOIN LATERAL (
+    SELECT array_agg(m.model_id ORDER BY m.model_id) AS models
+    FROM camera_config_revision_models AS m
+    WHERE m.camera_id = r.camera_id
+      AND m.config_version = r.config_version
+      AND m.is_active
+) AS active_models ON true
 ORDER BY e.event_at DESC
 LIMIT 10;
 ```
@@ -143,7 +162,7 @@ From the project root in WSL. Defaults sample the full 1920 × 1080, 60 FPS Pari
 |---|---|
 | Input video | `videos/reliability/paris_city_walk.mp4` |
 | GPU and engine | Compose NVIDIA GPU access and a compatible `artifacts/models/yolo11n_fp16.engine` |
-| Database | Project `.env` with application credentials. Migrations 004, 005, and 006 applied, then `camera-01.yaml` applied. |
+| Database | Project `.env` with application credentials. Migrations 004 through 008 applied, then `camera-01.yaml` applied. Do not apply migration 009 until external readers of the old columns are confirmed. |
 
 ```bash
 docker compose up -d --wait kafka object-store
@@ -155,6 +174,28 @@ docker compose run --rm -T dev python3 -u -m src.pipeline.run_tensorrt_end_to_en
 A zero exit code and the final PASS confirm a completed run. For a different clip, set `--batch-width` and `--batch-height` to its dimensions (DeepStream muxer size, not TensorRT batch size). Sampling uses presentation timestamps. Set `--fallback-source-fps` to the source frame rate when timestamps are missing. Omit `--max-samples` for full coverage. Compare the report's decoded count with the source video frame count. Each invocation generates a new session ID. Do not pass `--no-kafka-verify`; the end-to-end runner requires Kafka verification.
 
 If the local engine needs rebuilding, place YOLO11n weights in `artifacts/models/yolo11n.pt`, run `python -m tools.export_yolo11n_onnx` in an environment with `requirements-yolo.txt`, then run `docker compose run --rm --no-deps dev python3 -m tools.build_yolo11n_tensorrt_engine` on the target GPU. A compatible existing engine skips these steps.
+
+## Camera schema
+
+`cameras` keeps registration: `camera_id`, `name`, `rtsp_url`, `credential_ref`, `enabled`, `created_at`, and `current_config_version`. Zone, region, and the storage root live on `camera_config_revisions`. Each available model is one row in `camera_config_revision_models`; `is_active` says it is enabled. `camera_current_config` is the reporting view. Its `event_bucket` column is the bucket inside the current revision's storage root. `credential_ref` is a pointer, not the secret, and the view is granted to `ai_app` the same way `cameras` is.
+
+`camera_model_assignments` stays as the current registration table for the older cameras. Its primary key is `(camera_id, model_id)` and it has no revision, so it cannot keep immutable history. The pipeline does not read or write it. Revision history is `camera_config_revision_models`.
+
+| Before | After |
+|---|---|
+| `cameras.zone`, `region`, `available_models`, `current_model`, `event_storage_root` | Current values come from the revision and its assignment rows. The old columns remain until migration 009. |
+| `camera_config_revisions.available_models`, `active_models`, `model_assignments` | `camera_config_revision_models (camera_id, config_version, model_id, is_active)` |
+| `camera_events.event`, `confidence`, `person_id` | `primary_class`, `primary_confidence`, `primary_detection_index` |
+| `camera_events.event_bucket` generated from `event_storage_root` | `event_bucket_stored`, copied and checked against the generated bucket. Migration 009 renames it to `event_bucket` and drops the root. |
+| No engine identity | `engine_digest`, NULL on historical rows |
+
+Applying the same YAML twice, including a reordered model list, keeps the revision number. Changing only which model is active creates one new revision and leaves older events on the previous revision.
+
+```sql
+SELECT camera_id, zone, region, available_models, active_models, event_bucket
+FROM camera_current_config
+WHERE camera_id = 'camera-01';
+```
 
 ## Inspect PostgreSQL
 
@@ -171,12 +212,22 @@ SELECT camera_id, zone, region, current_config_version, available_models,
        current_model, event_bucket, event_storage_root
 FROM cameras;
 
-SELECT e.event_at, e.camera_id, e.event, e.confidence, e.person_id,
-       e.config_version, r.zone, e.event_bucket, e.clean_key, e.boxed_key
+SELECT e.event_at, e.camera_id, e.config_version, r.zone,
+       active_models.models AS active_models,
+       e.primary_class, e.primary_confidence, e.primary_detection_index,
+       COALESCE(e.event_bucket_stored, e.event_bucket) AS event_bucket,
+       e.clean_key, e.boxed_key
 FROM camera_events AS e
 LEFT JOIN camera_config_revisions AS r
   ON r.camera_id = e.camera_id
  AND r.config_version = e.config_version
+LEFT JOIN LATERAL (
+    SELECT array_agg(m.model_id ORDER BY m.model_id) AS models
+    FROM camera_config_revision_models AS m
+    WHERE m.camera_id = r.camera_id
+      AND m.config_version = r.config_version
+      AND m.is_active
+) AS active_models ON true
 ORDER BY e.event_at DESC
 LIMIT 10;
 ```

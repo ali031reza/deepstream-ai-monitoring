@@ -78,13 +78,28 @@ def validate_inference_result(
     if message.is_event and not message.event_type.strip():
         errors.append("event_type is required for event results")
 
-    # Older producers omit fields 30-32. A new event sends all three.
-    observation_present = any((
+    # Fields 33-35 identify the primary detection. Fields 30-32 are the
+    # previous summary and remain readable. A legacy person_id is not an index.
+    new_observation = any((
+        message.primary_class.strip(),
+        message.HasField("primary_detection_index"),
+        message.primary_confidence > 0,
+    ))
+    old_observation = any((
         message.event.strip(),
         message.person_id.strip(),
         message.confidence > 0,
     ))
-    if observation_present:
+    if new_observation:
+        if not message.primary_class.strip():
+            errors.append("primary_class is required")
+        if not message.HasField("primary_detection_index"):
+            errors.append("primary_detection_index is required")
+        elif message.primary_detection_index < 0:
+            errors.append("primary_detection_index cannot be negative")
+        if not isfinite(message.primary_confidence) or not 0.0 < message.primary_confidence <= 1.0:
+            errors.append("primary_confidence must be between 0 and 1")
+    elif old_observation:
         if not message.event.strip():
             errors.append("event is required")
         if not message.person_id.strip():
@@ -116,8 +131,14 @@ def validate_inference_result(
     if message.is_event:
         if not message.event_storage_root.startswith("s3://"):
             errors.append("Event requires an S3 storage root")
-        if message.boxed_key != message.storage_key.removesuffix(".jpg") + ".boxed.jpg":
-            errors.append("Event requires a matching boxed JPEG key")
+        stem = message.storage_key.removesuffix(".jpg")
+        boxed = message.boxed_key
+        if not (
+            boxed.startswith(stem + ".")
+            and boxed.endswith(".boxed.jpg")
+            and boxed != message.storage_key
+        ):
+            errors.append("Event requires a boxed JPEG key for this frame")
         if message.boxed_bytes <= 0 or not SHA256_PATTERN.fullmatch(message.boxed_sha256):
             errors.append("Event requires boxed JPEG size and SHA-256")
         if not isfinite(message.source_video_ms) or message.source_video_ms < 0:

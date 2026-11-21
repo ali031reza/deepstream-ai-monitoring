@@ -76,6 +76,14 @@ message InferenceResult {
     string event = 30;
     // Confidence of person_id. 0 means the producer did not send it.
     float confidence = 31;
-    // Same person_id as the highest-confidence qualifying person.
+    // Legacy frame-local ordinal such as "6090:1". Not a detection index.
     string person_id = 32;
+
+    // Zero-based index into detections. Absent means unknown.
+    // Zero is a real detection and must not be used as the unknown marker.
+    optional int32 primary_detection_index = 33;
+    string primary_class = 34;
+    float primary_confidence = 35;
+    // SHA-256 of the TensorRT engine file loaded for this result. Empty if unknown.
+    string engine_digest = 36;
 }
