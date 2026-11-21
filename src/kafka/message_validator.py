@@ -78,6 +78,20 @@ def validate_inference_result(
     if message.is_event and not message.event_type.strip():
         errors.append("event_type is required for event results")
 
+    # Older producers omit fields 30-32. A new event sends all three.
+    observation_present = any((
+        message.event.strip(),
+        message.person_id.strip(),
+        message.confidence > 0,
+    ))
+    if observation_present:
+        if not message.event.strip():
+            errors.append("event is required")
+        if not message.person_id.strip():
+            errors.append("person_id is required")
+        if not isfinite(message.confidence) or not 0.0 < message.confidence <= 1.0:
+            errors.append("confidence must be between 0 and 1")
+
     image_metadata_present = any((
         message.storage_key,
         message.image_format,

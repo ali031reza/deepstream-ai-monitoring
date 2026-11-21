@@ -50,6 +50,9 @@ class CameraConfigFileTest(unittest.TestCase):
         self.assertEqual(fields[23], "schema_version")
         self.assertEqual(fields[28], "source_video_ms")
         self.assertEqual(fields[29], "camera_config_version")
+        self.assertEqual(fields[30], "event")
+        self.assertEqual(fields[31], "confidence")
+        self.assertEqual(fields[32], "person_id")
         message = InferenceResult(schema_version="2.0", camera_config_version=4)
         encoded = message.SerializeToString()
         parsed = InferenceResult()
@@ -61,6 +64,53 @@ class CameraConfigFileTest(unittest.TestCase):
         older.ParseFromString(message.SerializeToString())
         self.assertEqual(older.camera_config_version, 0)
         self.assertIsNone(event_config_version(older.camera_config_version))
+
+    def test_kafka_event_carries_person_confidence_and_person_id(self):
+        from src.pipeline.run_tensorrt_event_pipeline import _assign_person_ids, _primary_person
+        from src.results.protobuf_result_adapter import build_inference_result
+
+        detections = [
+            {"class_id": 0, "class_name": "person", "confidence": 0.91,
+             "bbox_normalized": [0.1, 0.1, 0.4, 0.8], "synthetic": False},
+            {"class_id": 0, "class_name": "person", "confidence": 0.70,
+             "bbox_normalized": [0.5, 0.2, 0.8, 0.9], "synthetic": False},
+        ]
+        _assign_person_ids(detections, 6090)
+        primary = _primary_person(detections, detection_class="person", minimum_confidence=0.65)
+        message = build_inference_result(
+            {
+                "model_id": "yolo11n-person",
+                "frame_id": 6090,
+                "input_frame_shape": [1080, 1920, 3],
+                "status": "processed",
+                "is_event": True,
+                "event_type": "person_detected",
+                "storage_key": "events/camera-01/session/000000006090.jpg",
+                "event_storage_root": "s3://camera-events/events/camera-01",
+                "boxed_key": "events/camera-01/session/000000006090.boxed.jpg",
+                "boxed_sha256": "b" * 64,
+                "boxed_bytes": 11,
+                "source_video_ms": 1000.0,
+                "image_format": "jpeg",
+                "image_size_bytes": 10,
+                "image_sha256": "a" * 64,
+                "event": primary["class_name"],
+                "confidence": primary["confidence"],
+                "person_id": primary["person_id"],
+                "detections": detections,
+            },
+            camera_id="camera-01",
+            source_session_id="session",
+            frame_sequence=6090,
+            captured_at_ms=1,
+            worker_id="worker",
+            camera_config_version=1,
+        )
+        self.assertEqual(message.event, "person")
+        self.assertAlmostEqual(message.confidence, 0.91, places=5)
+        self.assertEqual(message.person_id, "6090:1")
+        self.assertEqual(message.detections[1].person_id, "6090:2")
+        self.assertEqual(message.schema_version, "2.0")
 
 
 class CameraConfigRevisionTest(unittest.TestCase):

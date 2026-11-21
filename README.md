@@ -37,7 +37,7 @@ flowchart LR
     class topic,images,events,revision,dead db
 ```
 
-The session reads one camera configuration revision from PostgreSQL before the first frame is decoded and copies that revision onto every sampled frame before the frame enters the inference queue. Kafka carries `camera_id` and `camera_config_version` with the model, session, frame sequence, timestamps, detections, and event object keys. It does not carry credentials, connection settings, or the rest of the camera registry. PostgreSQL stores the revision on `camera_events` and the immutable snapshot in `camera_config_revisions`. A message encoded before field 29 existed has `camera_config_version = 0`; the consumer stores that event with a NULL revision instead of assigning the current configuration. Editing `infra/postgres/cameras_counfig/camera-01.yaml` does not change a session that has already started. The next session loads the latest applied revision. There is no hot reload and no configuration topic.
+The session reads one camera configuration revision from PostgreSQL before the first frame is decoded and copies that revision onto every sampled frame before the frame enters the inference queue. Kafka carries `camera_id` and `camera_config_version` with the model, session, frame sequence, timestamps, detections, and event object keys. A qualifying frame also carries `event` (the model class, `person`), `confidence` of the strongest qualifying person, and `person_id`. `person_id` is `<frame sequence>:<number>`, and number 1 is the highest confidence in that frame. The model does not follow a person into the next frame. Every person in the frame is also listed in `detections` with that person's own `person_id` and `confidence`. PostgreSQL stores the same three values on `camera_events`. Messages from an older producer leave them empty, and the consumer stores NULL. It does not carry credentials, connection settings, or the rest of the camera registry. PostgreSQL stores the revision on `camera_events` and the immutable snapshot in `camera_config_revisions`. A message encoded before field 29 existed has `camera_config_version = 0`; the consumer stores that event with a NULL revision instead of assigning the current configuration. Editing `infra/postgres/cameras_counfig/camera-01.yaml` does not change a session that has already started. The next session loads the latest applied revision. There is no hot reload and no configuration topic.
 
 At default settings a sampled frame becomes an event when at least one person has confidence **≥ 0.65**. Multiple people in one frame produce one event, with a box around each qualifying person. Both paths still publish one Kafka result per sample. The end-to-end supervisor starts the results processor and waits for Kafka assignment before starting the video.
 
@@ -86,7 +86,9 @@ docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POS
   < infra/postgres/migrations/005_event_bucket.sql &&
 docker exec postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring -c "GRANT SELECT ON cameras TO ai_app; GRANT SELECT, INSERT ON camera_events TO ai_app;"' &&
 docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring' \
-  < infra/postgres/migrations/006_camera_config_revisions.sql
+  < infra/postgres/migrations/006_camera_config_revisions.sql &&
+docker exec -i postgres-postgres-1 sh -c 'exec psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER}" -d ai_monitoring' \
+  < infra/postgres/migrations/007_event_observation.sql
 ```
 
 Migration 006 seeds revision 1 from each camera's existing zone, models, and storage root. It leaves `region` unset when the camera has no region, and it leaves existing events unversioned. The checked-in migrations do not define `camera_model_assignments`. If that table is already present and has `camera_id`, revision 1 snapshots its rows before the revision becomes immutable.
@@ -94,7 +96,7 @@ Migration 006 seeds revision 1 from each camera's existing zone, models, and sto
 Validate and apply the desired camera file with the application database credentials from `.env`. The file has no credentials. Applying these values again keeps the same revision number. A real change inserts the next revision and updates the camera's current revision in one transaction. Names, connection settings, and credentials already stored for the camera are left as they are.
 
 ```bash
-python -m tools.apply_camera_config infra/postgres/cameras_counfig/camera-01.yaml
+docker compose run --rm --no-deps -T dev python3 -m tools.apply_camera_config infra/postgres/cameras_counfig/camera-01.yaml
 ```
 
 The registry seeds `camera-01` in zone `A`, with model names `fire` and `person`. The active model is `person`. Fire is a registry label only. Region is unset. The runner reads the applied revision's storage root from PostgreSQL and creates the bucket on first use. Compose keeps MinIO data in the named `camera_objects` volume.
@@ -109,7 +111,7 @@ ffmpeg -y -i videos/reliability/paris_city_walk.mp4 -frames:v 500 -an \
 ffprobe -v error -select_streams v:0 -count_frames \
   -show_entries stream=nb_read_frames -of csv=p=0 \
   videos/reliability/paris_first_500_frames.mp4
-python -m tools.apply_camera_config infra/postgres/cameras_counfig/camera-01.yaml
+docker compose run --rm --no-deps -T dev python3 -m tools.apply_camera_config infra/postgres/cameras_counfig/camera-01.yaml
 docker compose up -d --wait kafka object-store
 docker compose run --rm -T dev python3 -u -m src.pipeline.run_tensorrt_end_to_end \
   --source /workspace/videos/reliability/paris_first_500_frames.mp4 \
@@ -169,9 +171,8 @@ SELECT camera_id, zone, region, current_config_version, available_models,
        current_model, event_bucket, event_storage_root
 FROM cameras;
 
-SELECT e.event_at, e.source_video_ms, e.camera_id, e.config_version,
-       r.zone, r.region, e.model_id, e.event_type, e.event_bucket,
-       e.clean_key, e.boxed_key
+SELECT e.event_at, e.camera_id, e.event, e.confidence, e.person_id,
+       e.config_version, r.zone, e.event_bucket, e.clean_key, e.boxed_key
 FROM camera_events AS e
 LEFT JOIN camera_config_revisions AS r
   ON r.camera_id = e.camera_id
@@ -184,7 +185,7 @@ For one end-to-end run, use the session ID printed by the launcher:
 
 ```sql
 SELECT source_session_id, frame_sequence, event_at, source_video_ms,
-       event_type, clean_key, boxed_key, detections
+       event_type, event_bucket, clean_key, boxed_key, detections
 FROM camera_events
 WHERE source_session_id = '<session-id>'
 ORDER BY frame_sequence;
@@ -194,9 +195,9 @@ Leave with `\q`. One-shot from bash:
 
 ```bash
 docker exec -i postgres-postgres-1 sh -c 'exec psql -U "${POSTGRES_USER}" -d ai_monitoring' <<'SQL'
-SELECT source_session_id, COUNT(*) AS event_rows
+SELECT source_session_id, event_bucket, COUNT(*) AS event_rows
 FROM camera_events
-GROUP BY source_session_id
+GROUP BY source_session_id, event_bucket
 ORDER BY MAX(event_at) DESC;
 SQL
 ```

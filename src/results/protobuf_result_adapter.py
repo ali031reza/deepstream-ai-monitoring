@@ -179,6 +179,11 @@ def build_inference_result(
         result.boxed_sha256 = model_output["boxed_sha256"]
         result.boxed_bytes = model_output["boxed_bytes"]
         result.source_video_ms = model_output["source_video_ms"]
+        result.event = _required_string(model_output.get("event"), "event")
+        result.confidence = _finite_float(model_output.get("confidence"), "confidence")
+        if not 0 < result.confidence <= 1:
+            raise ValueError("confidence must be between 0 and 1")
+        result.person_id = _required_string(model_output.get("person_id"), "person_id")
 
     # Convert detections.
     detections = model_output.get("detections", [])
@@ -214,6 +219,11 @@ def build_inference_result(
             raise ValueError("Invalid detection confidence")
 
         detection.confidence = confidence
+        person_id = item.get("person_id")
+        if person_id is not None:
+            detection.person_id = _required_string(
+                person_id, f"detections[{index}].person_id"
+            )
 
         bbox = item.get("bbox_normalized")
 

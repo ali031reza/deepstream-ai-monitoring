@@ -47,6 +47,33 @@ def positive_int(value: str) -> int:
     return number
 
 
+def _assign_person_ids(detections: list[dict[str, Any]], frame_sequence: int) -> None:
+    """Number people inside one frame. 1 is the highest confidence."""
+    ordinal = 0
+    for item in detections:
+        if str(item.get("class_name", "")).casefold() != "person":
+            continue
+        ordinal += 1
+        item["person_id"] = f"{frame_sequence}:{ordinal}"
+
+
+def _primary_person(
+    detections: list[dict[str, Any]],
+    *,
+    detection_class: str,
+    minimum_confidence: float,
+) -> dict[str, Any]:
+    for item in detections:
+        if item.get("class_name", "").casefold() != detection_class.casefold():
+            continue
+        if float(item["confidence"]) < minimum_confidence:
+            continue
+        if not item.get("person_id"):
+            continue
+        return item
+    raise RuntimeError("A qualifying event has no person detection")
+
+
 def nonnegative_int(value: str) -> int:
     number = int(value)
     if number < 0:
@@ -545,6 +572,7 @@ class TensorRTEventWorker:
             packet.release()
 
             detections = [item.to_payload() for item in inference.detections]
+            _assign_person_ids(detections, packet.frame_sequence)
             qualifying = [
                 item for item in inference.detections
                 if item.class_id in self.settings.yolo.classes
@@ -598,6 +626,11 @@ class TensorRTEventWorker:
             }
 
             if image is not None:
+                primary = _primary_person(
+                    detections,
+                    detection_class=self.options.detection_class,
+                    minimum_confidence=self.options.event_min_confidence,
+                )
                 result_data.update({
                     "event_type": self.options.event_type,
                     "storage_key": image.storage_key,
@@ -609,6 +642,9 @@ class TensorRTEventWorker:
                     "image_format": image.image_format,
                     "image_size_bytes": image.image_size_bytes,
                     "image_sha256": image.image_sha256,
+                    "event": primary["class_name"],
+                    "confidence": primary["confidence"],
+                    "person_id": primary["person_id"],
                 })
 
             message = build_inference_result(

@@ -13,6 +13,11 @@ message Detection {
     repeated float bbox_normalized = 4;
 
     bool synthetic = 5;
+
+    // Person number inside this frame. 1 is the highest confidence.
+    // Empty for a detection that is not a person. The model does not
+    // follow the same person into the next frame.
+    string person_id = 6;
 }
 
 // Individual inference stage timing.
@@ -65,4 +70,12 @@ message InferenceResult {
     // Revision applied to this frame. 0 means the producer predates this field.
     // schema_version stays an independent contract version.
     uint32 camera_config_version = 29;
+
+    // Model class that qualified this frame, such as "person".
+    // Empty on messages encoded before this field existed.
+    string event = 30;
+    // Confidence of person_id. 0 means the producer did not send it.
+    float confidence = 31;
+    // Same person_id as the highest-confidence qualifying person.
+    string person_id = 32;
 }
