@@ -76,7 +76,17 @@ class EventFrameStore:
 
     @staticmethod
     def boxed_key(clean_key):
+        """Legacy boxed object name. Existing rows keep this key."""
         return str(PurePosixPath(clean_key).with_suffix(".boxed.jpg"))
+
+    @staticmethod
+    def boxed_key_for(clean_key: str, model_id: str) -> str:
+        """Boxed object for one model, so another model can keep its own annotations."""
+        model = model_id.strip()
+        if not model or "/" in model or "\\" in model or model in {".", ".."}:
+            raise ValueError("model_id must be a single path segment")
+        stem = str(PurePosixPath(clean_key).with_suffix(""))
+        return f"{stem}.{model}.boxed.jpg"
 
     def _encode(self, image: Image.Image) -> bytes:
         buffer = BytesIO()
@@ -126,11 +136,13 @@ class EventFrameStore:
         self._put_object(key, payload, digest, counter, time.perf_counter())
         return EventImage(key, "jpeg", len(payload), digest)
 
-    def put_pair(self, *, source_session_id, frame_sequence, rgb_array, boxes):
+    def put_pair(self, *, source_session_id, frame_sequence, rgb_array, boxes, model_id=None):
         """Encode the clean and boxed JPEGs, upload them together, and wait for both acks."""
         started = time.perf_counter()
         clean_key = f"{self.prefix}/{source_session_id}/{frame_sequence:012d}.jpg"
-        boxed_key = self.boxed_key(clean_key)
+        boxed_key = (
+            self.boxed_key_for(clean_key, model_id) if model_id else self.boxed_key(clean_key)
+        )
         image = Image.fromarray(rgb_array)
 
         encode_started = time.perf_counter()

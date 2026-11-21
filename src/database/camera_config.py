@@ -81,18 +81,20 @@ def load_camera_config_file(path: Path) -> CameraConfigFile:
     return CameraConfigFile(camera_id, zone, region, available, active, root)
 
 
+# This runner executes one real model. The schema may list more.
+SUPPORTED_EXECUTION_MODE = "person-only"
+SUPPORTED_ACTIVE_MODELS = frozenset({"person"})
+
+
 def load_applied_camera(database, camera_id: str) -> dict:
     """Read the revision the camera currently points at. No per-frame query."""
     with database.transaction() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT c.current_model, c.event_bucket, r.config_version, r.zone, r.region,
-                   r.available_models, r.active_models, r.event_storage_root
-            FROM public.cameras AS c
-            JOIN public.camera_config_revisions AS r
-              ON r.camera_id = c.camera_id
-             AND r.config_version = c.current_config_version
-            WHERE c.camera_id = %s
+            SELECT current_config_version, zone, region, event_storage_root, event_bucket,
+                   available_models, active_models
+            FROM public.camera_current_config
+            WHERE camera_id = %s
             """,
             (camera_id,),
         )
@@ -100,28 +102,46 @@ def load_applied_camera(database, camera_id: str) -> dict:
     if row is None:
         raise RuntimeError(
             f"Camera {camera_id!r} has no applied configuration revision. "
-            "Apply migration 006_camera_config_revisions.sql and "
-            "python -m tools.apply_camera_config infra/postgres/cameras_counfig/camera-01.yaml"
+            "Apply migration 008_expand_camera_schema.sql and "
+            "docker compose run --rm --no-deps -T dev python3 -m tools.apply_camera_config "
+            "infra/postgres/cameras_counfig/camera-01.yaml"
         )
-    current_model, event_bucket, version, zone, region, available, active, root = row
-    if current_model != "person" or "person" not in list(active):
-        raise ValueError(f"Camera {camera_id!r} must have active model person")
+    version, zone, region, root, event_bucket, available, active = row
+    active_models = list(active or [])
+    if frozenset(active_models) != SUPPORTED_ACTIVE_MODELS:
+        raise ValueError(
+            f"Execution mode {SUPPORTED_EXECUTION_MODE!r} requires active model person. "
+            f"Camera {camera_id!r} active models are {active_models}. "
+            "Additional models may be assigned, but this runner does not execute them."
+        )
     return {
         "camera_id": camera_id,
-        "current_model": current_model,
+        "execution_mode": SUPPORTED_EXECUTION_MODE,
         "event_bucket": event_bucket,
         "config_version": int(version),
         "zone": zone,
         "region": region,
-        "available_models": list(available),
-        "active_models": list(active),
+        "available_models": list(available or []),
+        "active_models": active_models,
         "event_storage_root": root,
     }
 
 
+def assignment_identity(available: tuple[str, ...] | list[str], active: tuple[str, ...] | list[str]) -> frozenset:
+    """Model membership ignores list order. Active models must be available."""
+    active_set = set(active)
+    return frozenset((model, model in active_set) for model in available)
+
+
 def apply_camera_config(connection, desired: CameraConfigFile) -> ApplyResult:
-    """Insert a revision only when the desired values differ. One transaction."""
+    """Insert a revision only when the normalized configuration differs."""
+    if not desired.active_models:
+        raise ValueError("active_models must contain at least one model")
     with connection.cursor() as cur:
+        if not _table_exists(cur, "camera_config_revision_models"):
+            raise RuntimeError(
+                "Apply infra/postgres/migrations/008_expand_camera_schema.sql before applying a camera file"
+            )
         cur.execute("SELECT set_config('camera_config.apply', 'on', true)")
         cur.execute(
             "SELECT camera_id FROM public.cameras WHERE camera_id = %s FOR UPDATE",
@@ -134,8 +154,7 @@ def apply_camera_config(connection, desired: CameraConfigFile) -> ApplyResult:
             )
         cur.execute(
             """
-            SELECT r.config_version, r.zone, r.region, r.available_models, r.active_models,
-                   r.event_storage_root
+            SELECT r.config_version, r.zone, r.region, r.event_storage_root
             FROM public.cameras AS c
             JOIN public.camera_config_revisions AS r
               ON r.camera_id = c.camera_id
@@ -145,7 +164,7 @@ def apply_camera_config(connection, desired: CameraConfigFile) -> ApplyResult:
             (desired.camera_id,),
         )
         current = cur.fetchone()
-        if current is not None and _same_revision(current, desired):
+        if current is not None and _same_revision(cur, current, desired):
             return ApplyResult(desired.camera_id, int(current[0]), created=False)
 
         cur.execute(
@@ -153,41 +172,19 @@ def apply_camera_config(connection, desired: CameraConfigFile) -> ApplyResult:
             (desired.camera_id,),
         )
         version = int(cur.fetchone()[0]) + 1
-        assignments = _assignment_snapshot(cur, desired.camera_id)
-        if len(desired.active_models) != 1:
-            raise ValueError(
-                "cameras.current_model stores one active model; active_models must contain exactly one model"
-            )
-        sole_active = desired.active_models[0]
-        cur.execute(
+        _insert_revision(cur, desired, version)
+        cur.executemany(
             """
-            INSERT INTO public.camera_config_revisions (
-                camera_id, config_version, zone, region, available_models, active_models,
-                event_storage_root, model_assignments
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            INSERT INTO public.camera_config_revision_models (
+                camera_id, config_version, model_id, is_active
+            ) VALUES (%s, %s, %s, %s)
             """,
-            (
-                desired.camera_id, version, desired.zone, desired.region,
-                list(desired.available_models), list(desired.active_models),
-                desired.event_storage_root, assignments,
-            ),
+            [
+                (desired.camera_id, version, model, model in set(desired.active_models))
+                for model in desired.available_models
+            ],
         )
-        cur.execute(
-            """
-            UPDATE public.cameras
-            SET zone = %s,
-                region = %s,
-                available_models = %s,
-                current_model = %s,
-                event_storage_root = %s,
-                current_config_version = %s
-            WHERE camera_id = %s
-            """,
-            (
-                desired.zone, desired.region, list(desired.available_models), sole_active,
-                desired.event_storage_root, version, desired.camera_id,
-            ),
-        )
+        _point_camera_at_revision(cur, desired, version)
     return ApplyResult(desired.camera_id, version, created=True)
 
 
@@ -199,38 +196,85 @@ def event_config_version(camera_config_version: int) -> int | None:
     return None if version == 0 else version
 
 
-def _same_revision(row, desired: CameraConfigFile) -> bool:
-    _version, zone, region, available, active, root = row
-    return (
-        zone,
-        region,
-        tuple(available),
-        tuple(active),
-        root,
-    ) == desired.as_tuple()
-
-
-def _assignment_snapshot(cursor, camera_id: str) -> str:
+def _same_revision(cursor, row, desired: CameraConfigFile) -> bool:
+    _version, zone, region, root = row
     cursor.execute(
         """
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-          AND table_name = 'camera_model_assignments'
-          AND column_name = 'camera_id'
-        """
-    )
-    if cursor.fetchone() is None:
-        return "[]"
-    cursor.execute(
-        """
-        SELECT COALESCE(jsonb_agg(to_jsonb(a)), '[]'::jsonb)::text
-        FROM public.camera_model_assignments AS a
-        WHERE a.camera_id = %s
+        SELECT model_id, is_active
+        FROM public.camera_config_revision_models
+        WHERE camera_id = %s AND config_version = %s
         """,
-        (camera_id,),
+        (desired.camera_id, _version),
     )
-    return cursor.fetchone()[0]
+    stored = frozenset((model, bool(active)) for model, active in cursor.fetchall())
+    return (
+        zone == desired.zone
+        and region == desired.region
+        and root == desired.event_storage_root
+        and stored == assignment_identity(desired.available_models, desired.active_models)
+    )
+
+
+def _insert_revision(cursor, desired: CameraConfigFile, version: int) -> None:
+    columns = _column_names(cursor, "camera_config_revisions")
+    payload = {
+        "camera_id": desired.camera_id,
+        "config_version": version,
+        "zone": desired.zone,
+        "region": desired.region,
+        "event_storage_root": desired.event_storage_root,
+    }
+    if "available_models" in columns:
+        payload["available_models"] = list(desired.available_models)
+    if "active_models" in columns:
+        payload["active_models"] = list(desired.active_models)
+    if "model_assignments" in columns:
+        payload["model_assignments"] = "[]"
+    names = [name for name in payload if name in columns]
+    values = [payload[name] for name in names]
+    placeholders = ["%s::jsonb" if name == "model_assignments" else "%s" for name in names]
+    cursor.execute(
+        f"INSERT INTO public.camera_config_revisions ({', '.join(names)}) "
+        f"VALUES ({', '.join(placeholders)})",
+        values,
+    )
+
+
+def _point_camera_at_revision(cursor, desired: CameraConfigFile, version: int) -> None:
+    columns = _column_names(cursor, "cameras")
+    assignments = {
+        "current_config_version": version,
+        "zone": desired.zone,
+        "region": desired.region,
+        "available_models": list(desired.available_models),
+        "event_storage_root": desired.event_storage_root,
+    }
+    if "current_model" in columns:
+        assignments["current_model"] = (
+            desired.active_models[0] if len(desired.active_models) == 1 else None
+        )
+    sets = [name for name in assignments if name in columns]
+    cursor.execute(
+        f"UPDATE public.cameras SET {', '.join(f'{name} = %s' for name in sets)} WHERE camera_id = %s",
+        [assignments[name] for name in sets] + [desired.camera_id],
+    )
+
+
+def _table_exists(cursor, table: str) -> bool:
+    cursor.execute("SELECT to_regclass(%s)", (f"public.{table}",))
+    return cursor.fetchone()[0] is not None
+
+
+def _column_names(cursor, table: str) -> set[str]:
+    cursor.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        (table,),
+    )
+    return {row[0] for row in cursor.fetchall()}
 
 
 def _text(value, name: str) -> str:

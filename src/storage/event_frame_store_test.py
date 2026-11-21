@@ -95,6 +95,34 @@ class EventFrameStorePairTest(unittest.TestCase):
         self.assertEqual(store.stats()["boxed_saved"], 1)
         self.assertEqual(store.stats()["pair_latency"]["count"], 1)
 
+    def test_two_models_share_the_clean_jpeg_and_keep_separate_boxes(self):
+        client = _FakeClient()
+        store = EventFrameStore("s3://camera-events/events/camera-01", client=client)
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        boxes = ((1, 1, 8, 8),)
+        first_clean, first_boxed = store.put_pair(
+            source_session_id="session", frame_sequence=7, rgb_array=frame,
+            boxes=boxes, model_id="yolo11n-person",
+        )
+        second_clean, second_boxed = store.put_pair(
+            source_session_id="session", frame_sequence=7, rgb_array=frame,
+            boxes=((2, 2, 9, 9),), model_id="yolo11n-fire",
+        )
+        self.assertEqual(first_clean.storage_key, second_clean.storage_key)
+        self.assertEqual(first_clean.storage_key, "events/camera-01/session/000000000007.jpg")
+        self.assertEqual(
+            first_boxed.storage_key,
+            "events/camera-01/session/000000000007.yolo11n-person.boxed.jpg",
+        )
+        self.assertEqual(
+            second_boxed.storage_key,
+            "events/camera-01/session/000000000007.yolo11n-fire.boxed.jpg",
+        )
+        self.assertNotEqual(first_boxed.storage_key, second_boxed.storage_key)
+        self.assertEqual(store.stats()["saved"], 1)
+        self.assertEqual(store.stats()["reused"], 1)
+        self.assertEqual(store.stats()["boxed_saved"], 2)
+
 
 def _jpeg_bytes(image, client) -> bytes:
     return client.objects[image.storage_key]

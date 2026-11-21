@@ -59,12 +59,25 @@ def load_camera(database, camera_id):
     from src.database.camera_config import load_applied_camera
     try:
         with database.transaction() as conn, conn.cursor() as cur:
-            cur.execute("SELECT event_at, event_bucket, clean_key, boxed_key, config_version FROM camera_events LIMIT 0")
+            cur.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'camera_events'
+                """
+            )
+            columns = {row[0] for row in cur.fetchall()}
+            required = {"primary_class", "primary_detection_index", "engine_digest", "config_version"}
+            if not required <= columns or not ({"event_bucket_stored", "event_bucket"} & columns):
+                raise RuntimeError(
+                    "Apply PostgreSQL migrations 004_camera_events.sql through "
+                    "008_expand_camera_schema.sql first"
+                )
+            cur.execute("SELECT camera_id FROM camera_current_config LIMIT 0")
         return load_applied_camera(database, camera_id)
     except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
         raise RuntimeError(
             "Apply PostgreSQL migrations 004_camera_events.sql, 005_event_bucket.sql, "
-            "and 006_camera_config_revisions.sql first"
+            "006_camera_config_revisions.sql, and 008_expand_camera_schema.sql first"
         ) from exc
 
 
@@ -463,6 +476,10 @@ def main(argv: list[str] | None = None) -> dict:
         print("COMPLETE TENSORRT END-TO-END PIPELINE REPORT")
         print("=" * 78)
         print(f"Frames: {frame_counts}")
+        print(
+            f"Session: {session_id} config_version={camera['config_version']} "
+            f"engine_digest={producer_report.get('engine_digest', '')}"
+        )
         for stage, measurement in rates.items():
             value = measurement["per_second"]
             display = f"{value:.2f}" if value is not None else "n/a"
